@@ -1,0 +1,21 @@
+{
+  "name": "omp-auto-mode",
+  "version": "0.1.0",
+  "description": "Prototype tool-call safety classifier (safe / ask / unsafe) for omp auto-mode, backed by TypeSafe Jev",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=23.6" },
+  "bin": { "omp-auto-mode": "src/cli.ts" },
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "classify": "node src/cli.ts fixtures/tool-calls.json",
+    "test": "npm run typecheck && npm run classify"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "@typescript/native-preview": "^7.0.0-dev.20260707.2"
+  }
+}
