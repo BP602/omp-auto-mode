@@ -22,7 +22,7 @@ const toClassifierInput = (input: object): ToolCall["input"] => {
 };
 
 const describe = (v: Verdict): string =>
-  `p(safe/ask/unsafe)=${v.probabilities.map((p) => p.toFixed(2)).join("/")} conf=${v.confidence.toFixed(2)}`;
+  `p(safe/ask/unsafe)=${v.probabilities.map((p) => p.toFixed(2)).join("/")} confidence=${v.confidence.toFixed(2)}`;
 
 export default function autoMode(pi: ExtensionAPI) {
   pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
@@ -51,10 +51,10 @@ export default function autoMode(pi: ExtensionAPI) {
     if (!ctx.hasUI) {
       return { block: true, reason: `auto-mode: requires human approval but no UI is available (${describe(verdict)})` };
     }
-    const summary = JSON.stringify(call.input);
+    const summary = JSON.stringify(call.input).trim();
     const approved = await ctx.ui.confirm(
       `auto-mode: approve ${event.toolName}?`,
-      `${summary.length > 400 ? `${summary.slice(0, 400)}…` : summary}\n${describe(verdict)}`,
+      `${summary.length > 400 ? `${summary.slice(0, 400)}…` : summary}\n\n${describe(verdict)}`,
     );
     return approved ? undefined : { block: true, reason: "auto-mode: denied by user" };
   });

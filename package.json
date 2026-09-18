@@ -16,7 +16,8 @@
     "test": "npm run typecheck && npm run classify"
   },
   "dependencies": {
-    "@typesafe-ai/sdk": "^0.6.0"
+    "@typesafe-ai/sdk": "^0.6.0",
+    "typescript": "^7.0.2"
   },
   "devDependencies": {
     "@oh-my-pi/pi-coding-agent": "^18.2.6",
