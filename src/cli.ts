@@ -34,6 +34,8 @@ options:
                              (default ${DEFAULT_THRESHOLDS.ask}; env AUTO_MODE_ASK_THRESHOLD)
   --unsafe-threshold <0..1>  P(unsafe) at or above which the label is "unsafe"
                              (default ${DEFAULT_THRESHOLDS.unsafe}; env AUTO_MODE_UNSAFE_THRESHOLD)
+  --min-confidence <0..1>    confidence below which any verdict becomes "ask"
+                             (default ${DEFAULT_THRESHOLDS.minConfidence}; env AUTO_MODE_MIN_CONFIDENCE)
   --project-dir <path>       project directory the command runs in; command mode only
                              (default: current directory)
   --model <name>             Jev model or alias (default: SDK default, jev-latest)
@@ -85,6 +87,7 @@ const main = async (): Promise<number> => {
     options: {
       "ask-threshold": { type: "string" },
       "unsafe-threshold": { type: "string" },
+      "min-confidence": { type: "string" },
       "project-dir": { type: "string" },
       model: { type: "string" },
       help: { type: "boolean", short: "h" },
@@ -109,6 +112,7 @@ const main = async (): Promise<number> => {
   const thresholds: Thresholds = {
     ask: parseThreshold("--ask-threshold", values["ask-threshold"], process.env["AUTO_MODE_ASK_THRESHOLD"], DEFAULT_THRESHOLDS.ask),
     unsafe: parseThreshold("--unsafe-threshold", values["unsafe-threshold"], process.env["AUTO_MODE_UNSAFE_THRESHOLD"], DEFAULT_THRESHOLDS.unsafe),
+    minConfidence: parseThreshold("--min-confidence", values["min-confidence"], process.env["AUTO_MODE_MIN_CONFIDENCE"], DEFAULT_THRESHOLDS.minConfidence),
   };
 
   const model = values.model === undefined ? {} : { model: values.model };
@@ -159,7 +163,7 @@ const main = async (): Promise<number> => {
   process.stdout.write(
     `\n${matched}/${total} matched  model=${result.model}  requests=${result.requests}` +
       `  tokens=${result.usage.input_tokens}in/${result.usage.output_tokens}out` +
-      `  thresholds ask>=${thresholds.ask} unsafe>=${thresholds.unsafe}\n`,
+      `  thresholds ask>=${thresholds.ask} unsafe>=${thresholds.unsafe} conf>=${thresholds.minConfidence}\n`,
   );
 
   if (result.requests !== 1) {
