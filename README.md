@@ -70,8 +70,10 @@ Commands you trust (or never want run) can bypass the model entirely. Rules live
 ```
 
 A rule is a list of tokens with an optional trailing `*` meaning "any further arguments". Rules
-match only commands that are a flat argument list — no `;`, `&&`, `|`, `$(…)`, redirects, globs
-or expansions — so `git status; rm -rf ~` never matches `git status`; it goes to the classifier.
+match only commands that are a flat argument list — no `;`, `&&`, `|`, `$(…)`, globs, expansions,
+or redirects to real files — so `git status; rm -rf ~` never matches `git status`; it goes to the
+classifier. Redirects that cannot touch a file (`>/dev/null`, `2>/dev/null`, `2>&1`) are ignored
+for matching, so `npm test 2>&1` matches an `npm test` rule.
 
 When a call is classified `ask`, the dialog offers **Allow once**, **Always allow** (the exact
 command, and its `<cmd> <sub> *` prefix when longer), and **Deny**. Choosing *Always allow* appends

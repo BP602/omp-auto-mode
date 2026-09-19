@@ -21,6 +21,27 @@ describe("tokenize", () => {
     ]);
   });
 
+  it("drops redirections that cannot touch a file: /dev/null targets and descriptor dups", () => {
+    const cases: Record<string, readonly string[]> = {
+      "npm install -g ccusage 2>&1": ["npm", "install", "-g", "ccusage"],
+      "echo hi >/dev/null": ["echo", "hi"],
+      "echo hi > /dev/null": ["echo", "hi"],
+      "echo hi >> /dev/null": ["echo", "hi"],
+      "echo hi 2>/dev/null": ["echo", "hi"],
+      "echo hi 2> /dev/null": ["echo", "hi"],
+      "echo hi &>/dev/null": ["echo", "hi"],
+      "echo hi &>> /dev/null": ["echo", "hi"],
+      "echo hi >/dev/null 2>&1": ["echo", "hi"],
+      "echo hi 2>&1 >/dev/null": ["echo", "hi"],
+      "echo hi >&2": ["echo", "hi"],
+      "cat x < /dev/null": ["cat", "x"],
+      "echo 2 > /dev/null": ["echo", "2"],
+      'echo ">/dev/null"': ["echo", ">/dev/null"],
+      "echo a>/dev/null b": ["echo", "a", "b"],
+    };
+    for (const [command, argv] of Object.entries(cases)) assert.deepEqual(tokenize(command), argv, command);
+  });
+
   it("refuses anything with shell semantics beyond a flat argv", () => {
     for (const command of [
       "git status; rm -rf ~",
@@ -31,7 +52,22 @@ describe("tokenize", () => {
       "cat `echo x`",
       "echo ${HOME}",
       "ls > out.txt",
+      "ls >> out.txt",
+      "ls 2> err.txt",
+      "ls &> out.txt",
       "ls < in.txt",
+      "ls <<< text",
+      "cat < ~/.ssh/id_rsa",
+      "ls >/dev/null2",
+      "ls >/dev/null/x",
+      "ls >/dev/./null",
+      "ls > /dev/nul",
+      "ls >",
+      "ls 2>&3",
+      "ls <&0",
+      "ls >2",
+      "diff <(ls a) <(ls b)",
+      "echo hi >/dev/null; rm -rf ~",
       "rm -rf ~/",
       "ls *.ts",
       "ls file?",
@@ -118,6 +154,13 @@ describe("rules files", () => {
       deny: [],
     });
     assert.deepEqual(JSON.parse(await readFile(project, "utf8")), { allow: ["git status", "ls"] });
+  });
+
+  it("does not append a rule that is already present", async () => {
+    const path = join(dir, "dedup", "auto-mode.json");
+    await appendAllowRule(path, ["npm", "install", "-g", "ccusage"]);
+    await appendAllowRule(path, ["npm", "install", "-g", "ccusage"]);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { allow: ["npm install -g ccusage"] });
   });
 
   it("rejects malformed files instead of silently ignoring them", async () => {

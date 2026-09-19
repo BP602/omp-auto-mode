@@ -31,9 +31,18 @@ export class InvalidRule extends Error {}
 const METACHARS = /[;&|<>()$`\\\n*?[\]{}~!#]/;
 
 /**
+ * The only redirection targets the rule layer vouches for. Sending a stream to `/dev/null` or
+ * duplicating one onto another (`2>&1`) changes where output goes, never what executes or which
+ * files are touched. Any real file target — `> out.txt`, `< secret` — is refused.
+ */
+const NULL_TARGET = /^[ \t]*\/dev\/null(?=$|[\s"'])/;
+const FD_DUP = /^[ \t]*&[12](?=$|[\s"'])/;
+
+/**
  * Split a command into arguments, or `undefined` when it cannot be trusted as a flat argv:
  * any metacharacter, expansion, unbalanced quote, or escape disqualifies it. Plain `"…"` and
- * `'…'` quoting is honoured so that `git commit -m "fix: x"` remains matchable.
+ * `'…'` quoting is honoured so that `git commit -m "fix: x"` remains matchable, and
+ * redirections to `/dev/null` or between descriptors are dropped rather than refused.
  */
 export const tokenize = (command: string): readonly string[] | undefined => {
   const argv: string[] = [];
@@ -41,30 +50,47 @@ export const tokenize = (command: string): readonly string[] | undefined => {
   let inToken = false;
   let quote: '"' | "'" | undefined;
 
-  for (const ch of command) {
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!;
     if (quote !== undefined) {
-      if (ch === quote) {
-        quote = undefined;
-      } else if (ch === "$" || ch === "`" || ch === "\\" || ch === "\n") {
-        return undefined;
-      } else {
-        current += ch;
-      }
+      if (ch === quote) quote = undefined;
+      else if (ch === "$" || ch === "`" || ch === "\\" || ch === "\n") return undefined;
+      else current += ch;
       continue;
     }
     if (ch === '"' || ch === "'") {
       quote = ch;
       inToken = true;
-    } else if (ch === " " || ch === "\t") {
+      continue;
+    }
+    if (ch === " " || ch === "\t") {
       if (inToken) argv.push(current);
       current = "";
       inToken = false;
-    } else if (METACHARS.test(ch)) {
-      return undefined;
-    } else {
-      current += ch;
-      inToken = true;
+      continue;
     }
+    if (ch === "&") {
+      // `&>` / `&>>` redirect both streams; the `>` is handled on the next iteration.
+      if (command[i + 1] !== ">") return undefined;
+      continue;
+    }
+    if (ch === ">" || ch === "<") {
+      // A lone digit glued to the operator is a file descriptor (`2>`), not an argument;
+      // anything else glued to it (`a>/dev/null`) is an ordinary argument that ends here.
+      if (inToken && current !== "0" && current !== "1" && current !== "2") argv.push(current);
+      current = "";
+      inToken = false;
+      let after = i + 1;
+      if (ch === ">" && command[after] === ">") after += 1;
+      const rest = command.slice(after);
+      const consumed = (ch === ">" ? FD_DUP.exec(rest) : null) ?? NULL_TARGET.exec(rest);
+      if (consumed === null) return undefined;
+      i = after + consumed[0].length - 1;
+      continue;
+    }
+    if (METACHARS.test(ch)) return undefined;
+    current += ch;
+    inToken = true;
   }
   if (quote !== undefined) return undefined;
   if (inToken) argv.push(current);
@@ -151,10 +177,12 @@ export const loadRules = async (paths: readonly string[]): Promise<Rules> => {
   };
 };
 
-/** Append one allow rule to a rules file, creating the file and its directory if needed. */
+/** Append one allow rule to a rules file, creating the file and its directory if needed; no-op if present. */
 export const appendAllowRule = async (path: string, rule: Rule): Promise<void> => {
   const file = await readRulesFile(path);
-  const allow = [...(file.allow ?? []), formatRule(rule)];
+  const text = formatRule(rule);
+  if (file.allow?.includes(text)) return;
+  const allow = [...(file.allow ?? []), text];
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify({ ...file, allow }, null, 2)}\n`);
 };
