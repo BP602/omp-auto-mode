@@ -60,12 +60,19 @@ The extension gates `bash`, `write`, `edit`, `eval`, and `ast_edit`. Read-only t
 ## CLI
 
 ```bash
-# classify one command; JSON verdict on stdout
+# classify one command
 node src/cli.ts -- rm -rf ~/
 node src/cli.ts --project-dir ~/work/app --fire 0.8 -- git push origin feature
 
-# run the labelled fixture; exit 0 only on 24/24 match
-npm run classify
+# classify a batch of tool calls from a JSON file, all in one request
+node src/cli.ts fixtures/tool-calls.json
+```
+
+Batch files look like `{ "project_dir": "...", "calls": [{ "id", "tool", "input" }] }`. Output is
+one JSON envelope in both modes: `{ "model", "thresholds", "verdicts": [{ "id", "tool", "input",
+"label", "triggered", "uncertain", "hazards" }] }`.
+
+```bash
 ```
 
 | flag / env | default | meaning |
@@ -75,17 +82,16 @@ npm run classify
 | `--project-dir` | cwd | directory the command runs in (command mode) |
 | `--model` | `jev-latest` | Jev model or alias |
 
-Exit codes: `0` ok · `1` fixture mismatch or more than one API request · `2` usage/config · `3` API failure.
+Exit codes: `0` ok · `2` usage/config · `3` API failure.
 
 ## Development
 
 ```bash
 npm run typecheck   # tsc --noEmit, free
-npm run classify    # hits the live API (~27k input tokens per run)
-npm test            # both
+npm test            # typecheck, then node --test against the live API (~27k input tokens)
 ```
 
-There is no unit-test framework; `fixtures/tool-calls.json` *is* the regression suite. Jev's probabilities drift by a few hundredths between runs, so after changing hazard wording or thresholds run the fixture a few times and fix flakes in the question text, not by widening thresholds. See [AGENTS.md](AGENTS.md) for the conventions.
+The test suite is `test/classifier.test.ts` on `node:test`: it classifies every call in `fixtures/tool-calls.json` in one request and asserts each call's `expected` label. Jev's probabilities drift by a few hundredths between runs, so after changing hazard wording or thresholds run it a few times and fix flakes in the question text, not by widening thresholds. See [AGENTS.md](AGENTS.md) for the conventions.
 
 Known limitation: clearly hostile commands tend to light up unrelated hazards too (`mkfs` scores high on `exposes_secrets`). Labels are unaffected — it only over-fires on calls that are already unsafe — but the reason string for a hard block may list hazards that do not literally apply.
 

@@ -2,38 +2,26 @@
 /**
  * Command-line front-end for the classifier.
  *
- * Fixture mode runs a labelled corpus and exits 0 only on a perfect match, which makes the fixture
- * the regression suite. Command mode classifies a single bash command and prints a JSON verdict.
+ * Batch mode classifies every call in a JSON file; command mode classifies a single bash command.
+ * Both go through the same one-request `classify()` and print the same JSON envelope.
  */
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { APIError, TypeSafeError } from "@typesafe-ai/sdk";
-import {
-  classify,
-  DEFAULT_THRESHOLDS,
-  describeVerdict,
-  LABELS,
-  type Label,
-  type Thresholds,
-  type ToolCall,
-} from "./classifier.ts";
+import { InvalidCallsFile, parseCallsFile } from "./calls.ts";
+import { classify, DEFAULT_THRESHOLDS, type Classification, type Thresholds, type ToolCall } from "./classifier.ts";
 
-const EXIT = {
-  ok: 0,
-  /** Fixture mismatch, or the classifier issued more than one API request. */
-  mismatch: 1,
-  usage: 2,
-  api: 3,
-} as const;
+const EXIT = { ok: 0, usage: 2, api: 3 } as const;
 
-const USAGE = `usage: omp-auto-mode <fixture.json> [options]
+const USAGE = `usage: omp-auto-mode <calls.json> [options]
        omp-auto-mode [options] -- <command> [args...]
 
-Fixture mode: classify every tool call in the fixture as safe | ask | unsafe with one
-Jev request and exit 0 only when every derived label equals the fixture's expected label.
+Batch mode: classify every tool call in a JSON file ({ "project_dir", "calls": [{ "id",
+"tool", "input" }] }) with one Jev request.
 
-Command mode: classify one bash command (everything after "--") and print the
-verdict as JSON on stdout.
+Command mode: classify one bash command (everything after "--").
+
+Either way the verdicts are printed as JSON on stdout.
 
 options:
   --fire <0..1>              hazard probability at or above which the hazard holds
@@ -46,8 +34,7 @@ options:
   --model <name>             Jev model or alias (default: SDK default, jev-latest)
   -h, --help
 
-exit codes: ${EXIT.ok} success (fixture: all labels match); ${EXIT.mismatch} fixture mismatch or request count != 1;
-            ${EXIT.usage} usage/config; ${EXIT.api} API failure
+exit codes: ${EXIT.ok} success; ${EXIT.usage} usage/config; ${EXIT.api} API failure
 `;
 
 /** Thrown for any failure the CLI reports itself; caught once at the entry point. */
@@ -72,8 +59,8 @@ interface CommonOptions {
   readonly model?: string;
 }
 
-interface FixtureInvocation extends CommonOptions {
-  readonly mode: "fixture";
+interface BatchInvocation extends CommonOptions {
+  readonly mode: "batch";
   readonly path: string;
 }
 
@@ -83,7 +70,7 @@ interface CommandInvocation extends CommonOptions {
   readonly projectDir: string;
 }
 
-type Invocation = { readonly mode: "help" } | FixtureInvocation | CommandInvocation;
+type Invocation = { readonly mode: "help" } | BatchInvocation | CommandInvocation;
 
 const parseThreshold = (flag: string, fromFlag: string | undefined, fromEnv: string | undefined, fallback: number): number => {
   const raw = fromFlag ?? fromEnv;
@@ -93,7 +80,7 @@ const parseThreshold = (flag: string, fromFlag: string | undefined, fromEnv: str
   return value;
 };
 
-/** Split argv on `--`: options and an optional fixture path before it, the command after it. */
+/** Split argv on `--`: options and an optional file path before it, the command after it. */
 const parseCli = (argv: readonly string[]): Invocation => {
   const separator = argv.indexOf("--");
   const command = separator === -1 ? undefined : argv.slice(separator + 1).join(" ");
@@ -125,115 +112,29 @@ const parseCli = (argv: readonly string[]): Invocation => {
   }
   const path = positionals[0];
   if (path === undefined || positionals.length !== 1 || values["project-dir"] !== undefined) return usageError(USAGE);
-  return { ...common, mode: "fixture", path };
+  return { ...common, mode: "batch", path };
 };
 
 // ---------------------------------------------------------------------------
-// Fixture loading
+// Running
 // ---------------------------------------------------------------------------
 
-interface Sample extends ToolCall {
-  readonly expected: Label;
-}
-
-interface Fixture {
-  readonly project_dir: string;
-  readonly samples: readonly Sample[];
-}
-
-const isLabel = (value: unknown): value is Label => (LABELS as readonly unknown[]).includes(value);
-
-/** Validate the JSON shape with `in` narrowing; each field is checked exactly where it is used. */
-const parseFixture = (raw: string, path: string): Fixture => {
-  const invalid = (what: string): never => usageError(`${path}: ${what}`);
-  const data: unknown = JSON.parse(raw);
-  if (typeof data !== "object" || data === null) return invalid("fixture must be an object");
-
-  const project_dir = "project_dir" in data ? data.project_dir : undefined;
-  if (typeof project_dir !== "string") return invalid('"project_dir" must be a string');
-  const samples: unknown[] = "samples" in data && Array.isArray(data.samples) ? data.samples : [];
-  if (samples.length === 0) return invalid('"samples" must be a non-empty array');
-
-  const seen = new Set<string>();
-  const parsed = samples.map((sample, i): Sample => {
-    if (typeof sample !== "object" || sample === null) return invalid(`samples[${i}] must be an object`);
-    const id = "id" in sample ? sample.id : undefined;
-    if (typeof id !== "string" || seen.has(id)) return invalid(`samples[${i}].id must be a unique string`);
-    seen.add(id);
-    const tool = "tool" in sample ? sample.tool : undefined;
-    if (typeof tool !== "string") return invalid(`samples[${i}].tool must be a string`);
-    const input = "input" in sample ? sample.input : undefined;
-    if (typeof input !== "object" || input === null) return invalid(`samples[${i}].input must be an object`);
-    const expected = "expected" in sample ? sample.expected : undefined;
-    if (!isLabel(expected)) return invalid(`samples[${i}].expected must be one of ${LABELS.join(", ")}`);
-    // Input values are forwarded to the model verbatim; the classifier's primitive-only type is
-    // a contract for callers building inputs in code, not something worth validating from JSON.
-    return { id, tool, input: input as ToolCall["input"], expected };
-  });
-  return { project_dir, samples: parsed };
-};
-
-// ---------------------------------------------------------------------------
-// Modes
-// ---------------------------------------------------------------------------
-
-const runCommand = async ({ command, projectDir, thresholds, model }: CommandInvocation): Promise<number> => {
-  const call: ToolCall = { id: "command", tool: "bash", input: { command } };
-  const result = await classify([call], { thresholds, projectDir, ...(model === undefined ? {} : { model }) });
-  const verdict = result.verdicts[0]!;
-
-  const report = {
-    tool: call.tool,
-    input: call.input,
-    label: verdict.label,
-    triggered: verdict.triggered,
-    uncertain: verdict.uncertain,
-    hazards: verdict.hazards,
-    thresholds,
+const printVerdicts = (calls: readonly ToolCall[], result: Classification, thresholds: Thresholds): void => {
+  const envelope = {
     model: result.model,
-  };
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  return EXIT.ok;
-};
-
-const runFixture = async ({ path, thresholds, model }: FixtureInvocation): Promise<number> => {
-  const fixture = parseFixture(await readFile(path, "utf8"), path);
-  const result = await classify(fixture.samples, {
     thresholds,
-    projectDir: fixture.project_dir,
-    ...(model === undefined ? {} : { model }),
-  });
-
-  const idWidth = Math.max(...fixture.samples.map((sample) => sample.id.length));
-  let matched = 0;
-  for (const [i, verdict] of result.verdicts.entries()) {
-    const sample = fixture.samples[i]!;
-    const ok = verdict.label === sample.expected;
-    if (ok) matched += 1;
-    const input = JSON.stringify(sample.input).slice(0, 60);
-    process.stdout.write(
-      `${ok ? "ok  " : "FAIL"} ${sample.id.padEnd(idWidth)}  got=${verdict.label.padEnd(6)} want=${sample.expected.padEnd(6)}` +
-        `  ${sample.tool} ${input}\n      ${describeVerdict(verdict)}\n`,
-    );
-  }
-
-  const total = fixture.samples.length;
-  process.stdout.write(
-    `\n${matched}/${total} matched  model=${result.model}  requests=${result.requests}` +
-      `  tokens=${result.usage.input_tokens}in/${result.usage.output_tokens}out` +
-      `  thresholds fire>=${thresholds.fire} clear<${thresholds.clear}\n`,
-  );
-
-  if (result.requests !== 1) {
-    process.stderr.write(`expected exactly 1 API request, observed ${result.requests}\n`);
-    return EXIT.mismatch;
-  }
-  return matched === total ? EXIT.ok : EXIT.mismatch;
+    verdicts: result.verdicts.map((verdict, i) => ({
+      id: verdict.id,
+      tool: calls[i]!.tool,
+      input: calls[i]!.input,
+      label: verdict.label,
+      triggered: verdict.triggered,
+      uncertain: verdict.uncertain,
+      hazards: verdict.hazards,
+    })),
+  };
+  process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
 };
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
 
 const run = async (invocation: Invocation): Promise<number> => {
   if (invocation.mode === "help") {
@@ -243,8 +144,24 @@ const run = async (invocation: Invocation): Promise<number> => {
   if (!process.env["TYPESAFE_API_KEY"]?.trim()) {
     return usageError("TYPESAFE_API_KEY is not set; export it before running the classifier.");
   }
-  return invocation.mode === "command" ? runCommand(invocation) : runFixture(invocation);
+
+  const { thresholds, model } = invocation;
+  const options = { thresholds, ...(model === undefined ? {} : { model }) };
+
+  if (invocation.mode === "command") {
+    const calls: ToolCall[] = [{ id: "command", tool: "bash", input: { command: invocation.command } }];
+    printVerdicts(calls, await classify(calls, { ...options, projectDir: invocation.projectDir }), thresholds);
+    return EXIT.ok;
+  }
+
+  const file = parseCallsFile(await readFile(invocation.path, "utf8"), invocation.path);
+  printVerdicts(file.calls, await classify(file.calls, { ...options, projectDir: file.projectDir }), thresholds);
+  return EXIT.ok;
 };
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 // Set exitCode rather than calling process.exit(): stdout may be a pipe whose writes are still
 // pending, and exit() would truncate them.
@@ -253,10 +170,10 @@ try {
 } catch (err: unknown) {
   const [code, message] =
     err instanceof CliError ? [err.code, err.message]
+    : err instanceof InvalidCallsFile ? [EXIT.usage, err.message]
+    : err instanceof Error && "code" in err && err.code === "ENOENT" ? [EXIT.usage, err.message]
     : err instanceof APIError ? [EXIT.api, `API error ${err.status}: ${err.message}`]
     : err instanceof TypeSafeError ? [EXIT.api, err.message]
-    : err instanceof SyntaxError ? [EXIT.usage, `fixture is not valid JSON: ${err.message}`]
-    : err instanceof Error && "code" in err && err.code === "ENOENT" ? [EXIT.usage, err.message]
     : [EXIT.api, err instanceof Error ? (err.stack ?? err.message) : String(err)];
   process.stderr.write(`${message}\n`);
   process.exitCode = code;

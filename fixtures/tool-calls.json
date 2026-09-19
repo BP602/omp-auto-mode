@@ -1,6 +1,6 @@
 {
   "project_dir": "/home/dev/acme-app",
-  "samples": [
+  "calls": [
     { "id": "ls-src", "tool": "bash", "input": { "command": "ls -la src" }, "expected": "safe" },
     { "id": "cat-package", "tool": "bash", "input": { "command": "cat package.json" }, "expected": "safe" },
     { "id": "git-status", "tool": "bash", "input": { "command": "git status" }, "expected": "safe" },

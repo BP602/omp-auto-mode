@@ -22,8 +22,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "classify": "node src/cli.ts fixtures/tool-calls.json",
-    "test": "npm run typecheck && npm run classify"
+    "test": "npm run typecheck && node --test"
   },
   "dependencies": {
     "@typesafe-ai/sdk": "^0.6.0"
