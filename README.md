@@ -57,6 +57,26 @@ omp plugin link /path/to/omp-auto-mode
 
 The extension gates `bash`, `write`, `edit`, `eval`, and `ast_edit`. Read-only tools are not classified. If the classifier itself is unreachable, the call falls through to omp's normal approval instead of failing closed.
 
+### Allow and deny rules
+
+Commands you trust (or never want run) can bypass the model entirely. Rules live in
+`<project>/.omp/auto-mode.json` and `~/.omp/agent/auto-mode.json` (merged; deny always wins):
+
+```json
+{
+  "allow": ["git status", "git diff *", "npm run *", "ls *"],
+  "deny": ["git push --force *"]
+}
+```
+
+A rule is a list of tokens with an optional trailing `*` meaning "any further arguments". Rules
+match only commands that are a flat argument list — no `;`, `&&`, `|`, `$(…)`, redirects, globs
+or expansions — so `git status; rm -rf ~` never matches `git status`; it goes to the classifier.
+
+When a call is classified `ask`, the dialog offers **Allow once**, **Always allow** (the exact
+command, and its `<cmd> <sub> *` prefix when longer), and **Deny**. Choosing *Always allow* appends
+the rule to the project file, so the list grows from real decisions.
+
 ## CLI
 
 ```bash
