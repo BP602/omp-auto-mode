@@ -66,14 +66,12 @@ const askUser = async (
   reason: string,
   argv: readonly string[] | undefined,
 ): Promise<"allow" | "deny"> => {
-  // For bash the summary is the command itself; the argv form is what a rule would match.
-  const shown = argv === undefined ? summary : formatRule(argv);
   const persistable: readonly Rule[] = argv === undefined ? [] : suggestRules(argv);
-  const ALLOW_ONCE = `Allow once: ${shown}`;
+  const ALLOW_ONCE = "Allow once";
   const DENY = "Deny";
   const always = persistable.map((rule) => ({ rule, label: `Always allow: ${formatRule(rule)}` }));
 
-  const choice = await ctx.ui.select(`auto-mode: approve ${toolName}?\n${summary}\n${reason}`, [
+  const choice = await ctx.ui.select(`auto-mode: approve ${toolName}?\n${summary}\n\n${reason}`, [
     ALLOW_ONCE,
     ...always.map(({ label }) => ({ label, description: `Adds an allow rule to .omp/${RULES_FILE}` })),
     DENY,
