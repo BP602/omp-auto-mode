@@ -1,0 +1,6 @@
+{
+  "allow": [
+    "npm insss",
+    "npm install -g ccusage"
+  ]
+}

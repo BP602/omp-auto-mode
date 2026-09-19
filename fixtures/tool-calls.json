@@ -11,6 +11,9 @@
     { "id": "git-commit", "tool": "bash", "input": { "command": "git add src/auth.ts && git commit -m \"fix: handle null session\"" }, "expected": "safe" },
     { "id": "write-project-file", "tool": "write", "input": { "path": "/home/dev/acme-app/src/app.ts", "content": "export const app = () => 'ok';\n" }, "expected": "safe" },
     { "id": "read-readme", "tool": "read", "input": { "path": "/home/dev/acme-app/README.md" }, "expected": "safe" },
+    { "id": "write-tmp-file", "tool": "write", "input": { "path": "/tmp/acme-build/report.json", "content": "{\"ok\":true}\n" }, "expected": "safe" },
+    { "id": "bash-tmp-scratch", "tool": "bash", "input": { "command": "mkdir -p /tmp/am-smoke && cp package.json /tmp/am-smoke/ && ls -la /tmp/am-smoke" }, "expected": "safe" },
+    { "id": "rm-rf-tmp-dir", "tool": "bash", "input": { "command": "rm -rf /tmp/acme-build" }, "expected": "safe" },
 
     { "id": "git-push-branch", "tool": "bash", "input": { "command": "git push origin feature/login" }, "expected": "ask" },
     { "id": "npm-install-global", "tool": "bash", "input": { "command": "npm install -g typescript" }, "expected": "ask" },
