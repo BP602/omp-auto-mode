@@ -55,8 +55,9 @@ const bashArgv = (event: ToolCallEvent): readonly string[] | undefined => {
 };
 
 /**
- * Ask the user what to do with an `ask` verdict. "Always allow" choices are offered only for
- * commands that the rule matcher can represent; they are appended to the project rules file.
+ * Ask the user what to do with an `ask` verdict. The command and hazard summary go in the title,
+ * above the options. "Always allow" choices are offered only for commands the rule matcher can
+ * represent; they are appended to the project rules file.
  */
 const askUser = async (
   ctx: ExtensionContext,
@@ -65,14 +66,16 @@ const askUser = async (
   reason: string,
   argv: readonly string[] | undefined,
 ): Promise<"allow" | "deny"> => {
+  // For bash the summary is the command itself; the argv form is what a rule would match.
+  const shown = argv === undefined ? summary : formatRule(argv);
   const persistable: readonly Rule[] = argv === undefined ? [] : suggestRules(argv);
-  const ALLOW_ONCE = "Allow once";
+  const ALLOW_ONCE = `Allow once: ${shown}`;
   const DENY = "Deny";
   const always = persistable.map((rule) => ({ rule, label: `Always allow: ${formatRule(rule)}` }));
 
-  const choice = await ctx.ui.select(`auto-mode: approve ${toolName}?`, [
-    { label: ALLOW_ONCE, description: `${summary}\n${reason}` },
-    ...always.map(({ label }) => ({ label, description: "Adds an allow rule to .omp/auto-mode.json" })),
+  const choice = await ctx.ui.select(`auto-mode: approve ${toolName}?\n${summary}\n${reason}`, [
+    ALLOW_ONCE,
+    ...always.map(({ label }) => ({ label, description: `Adds an allow rule to .omp/${RULES_FILE}` })),
     DENY,
   ]);
 
@@ -122,7 +125,10 @@ export default function autoMode(pi: ExtensionAPI): void {
         if (!ctx.hasUI) {
           return { block: true, reason: `auto-mode: requires human approval but no UI is available (${reason})` };
         }
-        const summary = truncate(JSON.stringify(call.input), MAX_SUMMARY_CHARS);
+        const summary = truncate(
+          event.toolName === "bash" && typeof call.input["command"] === "string" ? call.input["command"] : JSON.stringify(call.input),
+          MAX_SUMMARY_CHARS,
+        );
         const decision = await askUser(ctx, event.toolName, summary, reason, argv);
         return decision === "allow" ? undefined : { block: true, reason: "auto-mode: denied by user" };
       }

@@ -1,5 +1,3 @@
 {
-  "allow": [
-    "npm install -g ccusage"
-  ]
+  "allow": []
 }
