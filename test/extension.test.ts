@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +20,7 @@ registerHooks({
     if (url === OMP_STUB) {
       return {
         format: "module",
-        source: 'export const getAgentDir = () => "/tmp/auto-mode-test-agent";',
+        source: "export const getAgentDir = () => globalThis.__autoModeTestAgentDir;",
         shortCircuit: true,
       };
     }
@@ -73,15 +73,23 @@ interface Invocation {
   readonly title: string | undefined;
   readonly options: readonly string[];
   readonly notifications: readonly string[];
+  readonly dialogs: readonly { readonly title: string; readonly options: readonly string[] }[];
 }
 
 let cwd: string;
+let agentDir: string;
 before(async () => {
   cwd = await mkdtemp(join(tmpdir(), "auto-mode-extension-"));
+  agentDir = join(cwd, "agent");
+  (globalThis as { __autoModeTestAgentDir?: string }).__autoModeTestAgentDir = agentDir;
   await mkdir(join(cwd, ".omp"), { recursive: true });
   await writeFile(
     join(cwd, ".omp", "auto-mode.json"),
-    JSON.stringify({ allow: ["curl *", "sh"], thresholds: { fire: 0.5, clear: 0.4 } }),
+    JSON.stringify({
+      allow: ["curl *", "sh"],
+      ask: ["git commit *", "git push *", "npm publish *"],
+      thresholds: { fire: 0.5, clear: 0.4 },
+    }),
   );
 });
 
@@ -89,10 +97,17 @@ after(async () => {
   await rm(cwd, { recursive: true, force: true });
 });
 
-const invoke = async (command: string, hasUI: boolean, selection = "Allow once"): Promise<Invocation> => {
+const invoke = async (
+  command: string,
+  hasUI: boolean,
+  selection: string | readonly string[] = "Allow once",
+): Promise<Invocation> => {
   let title: string | undefined;
   const options: string[] = [];
   const notifications: string[] = [];
+  const dialogs: { title: string; options: string[] }[] = [];
+  const choices = typeof selection === "string" ? [selection] : selection;
+  let choiceIndex = 0;
   const result = await toolCall()(
     { toolName: "bash", toolCallId: "call-1", input: { command } },
     {
@@ -100,16 +115,22 @@ const invoke = async (command: string, hasUI: boolean, selection = "Allow once")
       hasUI,
       ui: {
         select: async (prompt: string, offered: readonly (string | { readonly label: string })[]) => {
-          title = prompt;
-          options.push(...offered.map((option) => (typeof option === "string" ? option : option.label)));
-          return selection;
+          const labels = offered.map((option) => (typeof option === "string" ? option : option.label));
+          dialogs.push({ title: prompt, options: labels });
+          if (title === undefined) {
+            title = prompt;
+            options.push(...labels);
+          }
+          const choice = choices[choiceIndex];
+          choiceIndex += 1;
+          return choice;
         },
         notify: (message: string) => notifications.push(message),
       },
       modelRegistry: { getApiKeyForProvider: async () => undefined },
     },
   );
-  return { result, title, options, notifications };
+  return { result, title, options, notifications, dialogs };
 };
 
 describe("extension failure handling", () => {
@@ -155,5 +176,51 @@ describe("extension critical bash backstop", () => {
       reason: "auto-mode: requires human approval but no UI is available (matched the critical bash backstop)",
     });
     assert.deepEqual(invocation.options, []);
+  });
+});
+
+describe("extension rule persistence", () => {
+  it("saves an approved rule to the project scope", async () => {
+    const invocation = await invoke("git commit -m wip", true, [
+      "Always allow: git commit -m wip",
+      "This project",
+    ]);
+    assert.equal(invocation.result, undefined);
+    assert.deepEqual(invocation.dialogs[1]?.options, ["This project", "Everywhere", "Cancel"]);
+    const config = JSON.parse(await readFile(join(cwd, ".omp", "auto-mode.json"), "utf8")) as {
+      allow: string[];
+    };
+    assert.equal(config.allow.includes("git commit -m wip"), true);
+    assert.match(invocation.notifications[0] ?? "", /\.omp\/auto-mode\.json$/);
+  });
+
+  it("saves an approved rule to the agent scope", async () => {
+    const invocation = await invoke("git push origin main", true, [
+      "Always allow: git push origin main",
+      "Everywhere",
+    ]);
+    assert.equal(invocation.result, undefined);
+    const config = JSON.parse(await readFile(join(agentDir, "auto-mode.json"), "utf8")) as {
+      allow: string[];
+    };
+    assert.deepEqual(config.allow, ["git push origin main"]);
+    assert.match(invocation.notifications[0] ?? "", /agent\/auto-mode\.json$/);
+  });
+
+  it("treats a cancelled scope choice as allow once without writing a rule", async () => {
+    const invocation = await invoke("npm publish package", true, [
+      "Always allow: npm publish package",
+      "Cancel",
+    ]);
+    assert.equal(invocation.result, undefined);
+    assert.deepEqual(invocation.notifications, []);
+    const project = JSON.parse(await readFile(join(cwd, ".omp", "auto-mode.json"), "utf8")) as {
+      allow: string[];
+    };
+    const agent = JSON.parse(await readFile(join(agentDir, "auto-mode.json"), "utf8")) as {
+      allow: string[];
+    };
+    assert.equal(project.allow.includes("npm publish package"), false);
+    assert.equal(agent.allow.includes("npm publish package"), false);
   });
 });

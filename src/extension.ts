@@ -38,6 +38,9 @@ import {
 const GATED_TOOLS: Record<string, true> = { bash: true, write: true, edit: true, eval: true, ast_edit: true };
 
 const RULES_FILE = "auto-mode.json";
+const PROJECT_SCOPE = "This project";
+const AGENT_SCOPE = "Everywhere";
+const CANCEL = "Cancel";
 
 /** omp's provider id for the Jev backend; `omp token typesafe` reads the same credential. */
 const TYPESAFE_PROVIDER = "typesafe";
@@ -90,15 +93,25 @@ const askUser = async (
 
   const choice = await ctx.ui.select(`auto-mode: approve ${toolName}?\n${summary}\n\n${reason}`, [
     ALLOW_ONCE,
-    ...always.map(({ label }) => ({ label, description: `Adds an allow rule to .omp/${RULES_FILE}` })),
+    ...always.map(({ label }) => ({ label, description: "Choose a scope after approval" })),
     DENY,
   ]);
 
   if (choice === undefined || choice === DENY) return "deny";
   const chosen = always.find(({ label }) => label === choice);
   if (chosen !== undefined) {
-    await appendAllowRule(join(ctx.cwd, ".omp", RULES_FILE), chosen.rule);
-    ctx.ui.notify(`auto-mode: added allow rule "${formatRule(chosen.rule)}"`, "info");
+    const project = join(ctx.cwd, ".omp", RULES_FILE);
+    const agent = join(getAgentDir(), RULES_FILE);
+    const scope = await ctx.ui.select(`auto-mode: save "${formatRule(chosen.rule)}" where?`, [
+      { label: PROJECT_SCOPE, description: project },
+      { label: AGENT_SCOPE, description: agent },
+      CANCEL,
+    ]);
+    const path = scope === PROJECT_SCOPE ? project : scope === AGENT_SCOPE ? agent : undefined;
+    if (path !== undefined) {
+      await appendAllowRule(path, chosen.rule);
+      ctx.ui.notify(`auto-mode: added allow rule "${formatRule(chosen.rule)}" to ${path}`, "info");
+    }
   }
   return "allow";
 };

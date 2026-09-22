@@ -115,9 +115,11 @@ for matching, so `npm test 2>&1` matches an `npm test` rule.
 
 When a call is classified `ask` by a rule or by the model, the dialog offers **Allow once**,
 **Always allow** (the exact command, and its `<cmd> <sub> *` prefix when longer), and **Deny**.
-Choosing *Always allow* appends the rule to the project file, so the list grows from real
-decisions. It is offered only for a single command: persisting a rule for one half of `a && b`
-would allow that half on its own, which you never approved.
+After an *Always allow* choice, a second dialog selects **This project**
+(`<project>/.omp/auto-mode.json`) or **Everywhere** (`~/.omp/agent/auto-mode.json`). Cancelling the
+scope keeps the current approval but writes no rule. Persistent choices are offered only for a
+single command: persisting a rule for one half of `a && b` would allow that half on its own, which
+you never approved.
 
 Critical-pattern and classifier-error prompts offer only **Allow once** and **Deny**. An outage or
 backstop match cannot create a permanent bypass.
