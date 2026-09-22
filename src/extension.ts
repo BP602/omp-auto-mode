@@ -25,6 +25,8 @@ import {
   formatRule,
   isCriticalBash,
   loadRules,
+  parseRule,
+  ruleCovers,
   suggestRules,
   tokenize,
   type Chain,
@@ -41,6 +43,7 @@ const RULES_FILE = "auto-mode.json";
 const PROJECT_SCOPE = "This project";
 const AGENT_SCOPE = "Everywhere";
 const CANCEL = "Cancel";
+const EDIT_RULE = "Edit allow rule";
 
 /** omp's provider id for the Jev backend; `omp token typesafe` reads the same credential. */
 const TYPESAFE_PROVIDER = "typesafe";
@@ -74,9 +77,9 @@ const bashCommand = (event: ToolCallEvent): string | undefined => {
 };
 
 /**
- * Ask the user what to do. The command and the reason go in the title, above the options.
- * "Always allow" is offered only for a single command the rule matcher can represent: persisting a
- * rule for one half of `a && b` would allow that half on its own, which the user never approved.
+ * Ask the user what to do. Persistent choices are offered only for a single command the rule
+ * matcher can represent. Suggested rules can be edited and must still cover that command;
+ * persisting a rule for one half of `a && b` would allow that half alone without approval.
  */
 const askUser = async (
   ctx: ExtensionContext,
@@ -94,23 +97,43 @@ const askUser = async (
   const choice = await ctx.ui.select(`auto-mode: approve ${toolName}?\n${summary}\n\n${reason}`, [
     ALLOW_ONCE,
     ...always.map(({ label }) => ({ label, description: "Choose a scope after approval" })),
+    ...(persistable.length === 0 ? [] : [{ label: EDIT_RULE, description: "Edit before choosing a scope" }]),
     DENY,
   ]);
 
   if (choice === undefined || choice === DENY) return "deny";
-  const chosen = always.find(({ label }) => label === choice);
-  if (chosen !== undefined) {
+  let rule = always.find(({ label }) => label === choice)?.rule;
+  if (choice === EDIT_RULE && only !== undefined) {
+    let prefill = formatRule(persistable.at(-1)!);
+    while (rule === undefined) {
+      const edited = await ctx.ui.editor("auto-mode: edit allow rule", prefill, undefined, { promptStyle: true });
+      if (edited === undefined) return "allow";
+      prefill = edited;
+      try {
+        const candidate = parseRule(edited);
+        if (!ruleCovers(candidate, only)) {
+          ctx.ui.notify("auto-mode: rule does not match the approved command", "warning");
+          continue;
+        }
+        rule = candidate;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`auto-mode: invalid allow rule (${message})`, "warning");
+      }
+    }
+  }
+  if (rule !== undefined) {
     const project = join(ctx.cwd, ".omp", RULES_FILE);
     const agent = join(getAgentDir(), RULES_FILE);
-    const scope = await ctx.ui.select(`auto-mode: save "${formatRule(chosen.rule)}" where?`, [
+    const scope = await ctx.ui.select(`auto-mode: save "${formatRule(rule)}" where?`, [
       { label: PROJECT_SCOPE, description: project },
       { label: AGENT_SCOPE, description: agent },
       CANCEL,
     ]);
     const path = scope === PROJECT_SCOPE ? project : scope === AGENT_SCOPE ? agent : undefined;
     if (path !== undefined) {
-      await appendAllowRule(path, chosen.rule);
-      ctx.ui.notify(`auto-mode: added allow rule "${formatRule(chosen.rule)}" to ${path}`, "info");
+      await appendAllowRule(path, rule);
+      ctx.ui.notify(`auto-mode: added allow rule "${formatRule(rule)}" to ${path}`, "info");
     }
   }
   return "allow";

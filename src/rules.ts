@@ -194,7 +194,8 @@ export const parseRule = (text: string): Rule => {
 
 export const formatRule = (rule: Rule): string => rule.join(" ");
 
-const matches = (rule: Rule, argv: Argv): boolean => {
+/** Whether a rule covers the approved argv it is intended to persist for. */
+export const ruleCovers = (rule: Rule, argv: Argv): boolean => {
   const wildcard = rule.at(-1) === "*";
   const literal = wildcard ? rule.slice(0, -1) : rule;
   if (wildcard ? argv.length < literal.length : argv.length !== literal.length) return false;
@@ -210,7 +211,7 @@ const govern = (rules: Rules, argv: Argv): { tier: Tier; rule: Rule } | undefine
   let best: { tier: Tier; rule: Rule; score: number } | undefined;
   for (const tier of ["allow", "ask"] as const) {
     for (const rule of rules[tier]) {
-      if (!matches(rule, argv)) continue;
+      if (!ruleCovers(rule, argv)) continue;
       const score = specificity(rule);
       if (best === undefined || score > best.score || (score === best.score && tier === "ask")) {
         best = { tier, rule, score };
@@ -232,13 +233,13 @@ export const decide = (rules: Rules, chain: Chain): Decision | undefined => {
 };
 
 /**
- * Rules a user might want to persist after approving `argv`: the exact command, and — when it has
- * arguments beyond the first two tokens — the `<cmd> <sub> *` prefix.
+ * Representable rules a user might persist after approving `argv`: the exact command, and, when
+ * it has arguments beyond the first two tokens, the `<cmd> <sub> *` prefix. Exact argv containing
+ * whitespace cannot round-trip through the whitespace-delimited config grammar and is omitted.
  */
 export const suggestRules = (argv: Argv): readonly Rule[] => {
-  const exact: Rule = argv;
-  if (argv.length <= 2) return [exact];
-  return [exact, [...argv.slice(0, 2), "*"]];
+  const candidates: Rule[] = argv.length <= 2 ? [argv] : [argv, [...argv.slice(0, 2), "*"]];
+  return candidates.filter((rule) => rule.every((token) => !/\s/.test(token)));
 };
 
 // ---------------------------------------------------------------------------

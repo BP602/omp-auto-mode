@@ -114,10 +114,15 @@ never matches `git status`. Redirects that cannot touch a file (`>/dev/null`, `2
 for matching, so `npm test 2>&1` matches an `npm test` rule.
 
 When a call is classified `ask` by a rule or by the model, the dialog offers **Allow once**,
-**Always allow** (the exact command, and its `<cmd> <sub> *` prefix when longer), and **Deny**.
-After an *Always allow* choice, a second dialog selects **This project**
+suggested **Always allow** rules, **Edit allow rule**, and **Deny**. The editor starts with the
+wildcard suggestion, accepts the same trailing-`*` grammar as the config file, and keeps the user
+in the editor until the rule is valid and covers the command being approved. Cancelling the editor
+keeps the current approval but writes no rule. Exact suggestions are omitted when an argument
+contains whitespace because that shape cannot round-trip through the config grammar.
+
+After choosing or editing a persistent rule, a second dialog selects **This project**
 (`<project>/.omp/auto-mode.json`) or **Everywhere** (`~/.omp/agent/auto-mode.json`). Cancelling the
-scope keeps the current approval but writes no rule. Persistent choices are offered only for a
+scope also keeps the current approval without writing. Persistent choices are offered only for a
 single command: persisting a rule for one half of `a && b` would allow that half on its own, which
 you never approved.
 

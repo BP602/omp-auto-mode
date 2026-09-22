@@ -74,6 +74,7 @@ interface Invocation {
   readonly options: readonly string[];
   readonly notifications: readonly string[];
   readonly dialogs: readonly { readonly title: string; readonly options: readonly string[] }[];
+  readonly editors: readonly { readonly title: string; readonly prefill: string | undefined }[];
 }
 
 let cwd: string;
@@ -101,13 +102,16 @@ const invoke = async (
   command: string,
   hasUI: boolean,
   selection: string | readonly string[] = "Allow once",
+  edits: readonly (string | undefined)[] = [],
 ): Promise<Invocation> => {
   let title: string | undefined;
   const options: string[] = [];
   const notifications: string[] = [];
   const dialogs: { title: string; options: string[] }[] = [];
+  const editors: { title: string; prefill: string | undefined }[] = [];
   const choices = typeof selection === "string" ? [selection] : selection;
   let choiceIndex = 0;
+  let editIndex = 0;
   const result = await toolCall()(
     { toolName: "bash", toolCallId: "call-1", input: { command } },
     {
@@ -125,12 +129,18 @@ const invoke = async (
           choiceIndex += 1;
           return choice;
         },
+        editor: async (prompt: string, prefill: string | undefined) => {
+          editors.push({ title: prompt, prefill });
+          const edited = edits[editIndex];
+          editIndex += 1;
+          return edited;
+        },
         notify: (message: string) => notifications.push(message),
       },
       modelRegistry: { getApiKeyForProvider: async () => undefined },
     },
   );
-  return { result, title, options, notifications, dialogs };
+  return { result, title, options, notifications, dialogs, editors };
 };
 
 describe("extension failure handling", () => {
@@ -222,5 +232,55 @@ describe("extension rule persistence", () => {
     };
     assert.equal(project.allow.includes("npm publish package"), false);
     assert.equal(agent.allow.includes("npm publish package"), false);
+  });
+
+  it("edits a wildcard rule before choosing its scope", async () => {
+    const invocation = await invoke(
+      'git commit -m "fix null"',
+      true,
+      ["Edit allow rule", "This project"],
+      ["git commit -m *"],
+    );
+    assert.equal(invocation.result, undefined);
+    assert.deepEqual(invocation.editors, [
+      { title: "auto-mode: edit allow rule", prefill: "git commit *" },
+    ]);
+    const config = JSON.parse(await readFile(join(cwd, ".omp", "auto-mode.json"), "utf8")) as {
+      allow: string[];
+    };
+    assert.equal(config.allow.includes("git commit -m *"), true);
+  });
+
+  it("keeps editing until the rule is valid and covers the approved command", async () => {
+    const invocation = await invoke(
+      "npm publish beta",
+      true,
+      ["Edit allow rule", "Everywhere"],
+      ["git status", "*", "npm publish *"],
+    );
+    assert.equal(invocation.result, undefined);
+    assert.deepEqual(invocation.editors.map(({ prefill }) => prefill), [
+      "npm publish *",
+      "git status",
+      "*",
+    ]);
+    assert.match(invocation.notifications[0] ?? "", /does not match the approved command/);
+    assert.match(invocation.notifications[1] ?? "", /invalid allow rule/);
+    const config = JSON.parse(await readFile(join(agentDir, "auto-mode.json"), "utf8")) as {
+      allow: string[];
+    };
+    assert.equal(config.allow.includes("npm publish *"), true);
+  });
+
+  it("treats a cancelled rule editor as allow once", async () => {
+    const invocation = await invoke(
+      "git push origin feature",
+      true,
+      "Edit allow rule",
+      [undefined],
+    );
+    assert.equal(invocation.result, undefined);
+    assert.equal(invocation.dialogs.length, 1);
+    assert.deepEqual(invocation.notifications, []);
   });
 });

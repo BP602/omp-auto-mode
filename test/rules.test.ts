@@ -11,6 +11,7 @@ import {
   isCriticalBash,
   loadRules,
   parseRule,
+  ruleCovers,
   suggestRules,
   tokenize,
   type Rules,
@@ -221,6 +222,16 @@ describe("decide", () => {
   });
 });
 
+describe("ruleCovers", () => {
+  it("requires an edited exact or wildcard rule to cover the approved argv", () => {
+    const argv = ["git", "commit", "-m", "fix null"];
+    assert.equal(ruleCovers(parseRule("git commit -m *"), argv), true);
+    assert.equal(ruleCovers(parseRule("git commit *"), argv), true);
+    assert.equal(ruleCovers(parseRule("git push *"), argv), false);
+    assert.equal(ruleCovers(parseRule("git commit"), argv), false);
+  });
+});
+
 describe("suggestRules", () => {
   it("offers the exact command, plus a two-token prefix when there are more arguments", () => {
     assert.deepEqual(suggestRules(["git", "status"]), [["git", "status"]]);
@@ -228,6 +239,8 @@ describe("suggestRules", () => {
       ["git", "push", "origin", "feature/login"],
       ["git", "push", "*"],
     ]);
+
+    assert.deepEqual(suggestRules(["git", "commit", "-m", "fix null"]), [["git", "commit", "*"]]);
   });
 });
 
