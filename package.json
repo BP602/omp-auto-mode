@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Auto-mode for omp: classify tool calls as safe / ask / unsafe with TypeSafe Jev before they run",
   "license": "MIT",
-  "repository": "github:alexsatch/omp-auto-mode",
+  "repository": "github:BP602/omp-auto-mode",
   "keywords": [
     "omp",
     "oh-my-pi",

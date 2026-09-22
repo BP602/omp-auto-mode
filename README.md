@@ -44,7 +44,7 @@ Because each hazard is an absolute judgment, `safe` means *every* hazard came ba
 Requires Node ≥ 23.6 (runs TypeScript natively) and a TypeSafe credential.
 
 ```bash
-git clone https://github.com/alexsatch/omp-auto-mode
+git clone https://github.com/BP602/omp-auto-mode
 cd omp-auto-mode && npm install
 ```
 
@@ -159,8 +159,6 @@ Batch files look like `{ "project_dir": "...", "calls": [{ "id", "tool", "input"
 one JSON envelope in both modes: `{ "model", "thresholds", "verdicts": [{ "id", "tool", "input",
 "label", "triggered", "uncertain", "hazards" }] }`.
 
-```bash
-```
 
 | flag / env | default | meaning |
 |---|---|---|
