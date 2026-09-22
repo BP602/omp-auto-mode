@@ -2,8 +2,8 @@
  * omp extension: gate every classified tool call before it runs.
  *
  * Bash commands are first checked against the deterministic rules in `auto-mode.json` (project
- * `.omp/` and the omp agent directory). A `deny` rule blocks, an `allow` rule passes, and neither
- * costs a model request. Everything else goes to the classifier:
+ * `.omp/` and the omp agent directory). An `allow` rule passes and an `ask` rule prompts, neither
+ * costing a model request. Everything else goes to the classifier:
  *
  * - `safe`   → the call proceeds to omp's normal approval gate.
  * - `ask`    → the user chooses: allow once, always allow (persisted as a rule), or deny.
@@ -16,7 +16,7 @@
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ToolCallEvent } from "@oh-my-pi/pi-coding-agent";
 import { classify, DEFAULT_THRESHOLDS, describeVerdict, type ToolCall, type Verdict } from "./classifier.ts";
-import { appendAllowRule, decide, formatRule, loadRules, suggestRules, tokenize, type Rule } from "./rules.ts";
+import { appendAllowRule, decide, formatRule, loadRules, suggestRules, tokenize, type Chain, type Rule } from "./rules.ts";
 
 /**
  * Tools whose calls are classified. Read-only built-ins are skipped: omp already auto-approves
@@ -47,26 +47,27 @@ const toClassifierInput = (input: object): ToolCall["input"] => {
   return out;
 };
 
-/** The command's argv when the call is bash and the command is a flat, rule-matchable argv. */
-const bashArgv = (event: ToolCallEvent): readonly string[] | undefined => {
+/** The command's argv chain when the call is bash and every command in it is rule-matchable. */
+const bashChain = (event: ToolCallEvent): Chain | undefined => {
   if (event.toolName !== "bash") return undefined;
   const command = "command" in event.input ? event.input.command : undefined;
   return typeof command === "string" ? tokenize(command) : undefined;
 };
 
 /**
- * Ask the user what to do with an `ask` verdict. The command and hazard summary go in the title,
- * above the options. "Always allow" choices are offered only for commands the rule matcher can
- * represent; they are appended to the project rules file.
+ * Ask the user what to do. The command and the reason go in the title, above the options.
+ * "Always allow" is offered only for a single command the rule matcher can represent: persisting a
+ * rule for one half of `a && b` would allow that half on its own, which the user never approved.
  */
 const askUser = async (
   ctx: ExtensionContext,
   toolName: string,
   summary: string,
   reason: string,
-  argv: readonly string[] | undefined,
+  chain: Chain | undefined,
 ): Promise<"allow" | "deny"> => {
-  const persistable: readonly Rule[] = argv === undefined ? [] : suggestRules(argv);
+  const only = chain?.length === 1 ? chain[0]! : undefined;
+  const persistable: readonly Rule[] = only === undefined ? [] : suggestRules(only);
   const ALLOW_ONCE = "Allow once";
   const DENY = "Deny";
   const always = persistable.map((rule) => ({ rule, label: `Always allow: ${formatRule(rule)}` }));
@@ -90,15 +91,31 @@ export default function autoMode(pi: ExtensionAPI): void {
   pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
     if (!GATED_TOOLS[event.toolName]) return;
 
-    const argv = bashArgv(event);
-    if (argv !== undefined) {
+    const call: ToolCall = { id: event.toolCallId, tool: event.toolName, input: toClassifierInput(event.input) };
+    const summary = truncate(
+      event.toolName === "bash" && typeof call.input["command"] === "string" ? call.input["command"] : JSON.stringify(call.input),
+      MAX_SUMMARY_CHARS,
+    );
+
+    /** Run the approval dialog, or block when there is nobody to answer it. */
+    const prompt = async (reason: string, chain: Chain | undefined) => {
+      if (!ctx.hasUI) return { block: true, reason: `auto-mode: requires human approval but no UI is available (${reason})` };
+      const decision = await askUser(ctx, event.toolName, summary, reason, chain);
+      return decision === "allow" ? undefined : { block: true, reason: "auto-mode: denied by user" };
+    };
+
+    const chain = bashChain(event);
+    if (chain !== undefined) {
       const rules = await loadRules([join(ctx.cwd, ".omp", RULES_FILE), join(getAgentDir(), RULES_FILE)]);
-      const ruled = decide(rules, argv);
-      if (ruled === "deny") return { block: true, reason: `auto-mode: denied by rule in ${RULES_FILE}` };
-      if (ruled === "allow") return;
+      const ruled = decide(rules, chain);
+      if (ruled?.tier === "allow") return;
+      if (ruled?.tier === "ask") {
+        const reason = `matched ask rule "${formatRule(ruled.rule)}" in ${RULES_FILE}`;
+        pi.logger.info(`auto-mode: ${event.toolName} -> ask (${reason})`);
+        return prompt(reason, chain);
+      }
     }
 
-    const call: ToolCall = { id: event.toolCallId, tool: event.toolName, input: toClassifierInput(event.input) };
     let verdict: Verdict;
     try {
       const result = await classify([call], { thresholds: DEFAULT_THRESHOLDS, projectDir: ctx.cwd });
@@ -119,17 +136,8 @@ export default function autoMode(pi: ExtensionAPI): void {
       case "unsafe":
         ctx.ui.notify(`auto-mode: blocked ${event.toolName} (${reason})`, "error");
         return { block: true, reason: `auto-mode: blocked as unsafe (${reason})` };
-      case "ask": {
-        if (!ctx.hasUI) {
-          return { block: true, reason: `auto-mode: requires human approval but no UI is available (${reason})` };
-        }
-        const summary = truncate(
-          event.toolName === "bash" && typeof call.input["command"] === "string" ? call.input["command"] : JSON.stringify(call.input),
-          MAX_SUMMARY_CHARS,
-        );
-        const decision = await askUser(ctx, event.toolName, summary, reason, argv);
-        return decision === "allow" ? undefined : { block: true, reason: "auto-mode: denied by user" };
-      }
+      case "ask":
+        return prompt(reason, chain);
       default:
         return verdict.label satisfies never;
     }

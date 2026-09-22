@@ -1,54 +1,85 @@
 /**
- * Deterministic allow/deny rules for bash commands, checked before the classifier is consulted.
+ * Deterministic allow/ask rules for bash commands, checked before the classifier is consulted.
  *
  * A rule is a whitespace-separated token list, optionally ending in `*` ("any further arguments"):
- * `git status`, `npm run *`. It matches a command only when the command is a flat argument
- * vector with no shell metacharacters, so `git status; rm -rf ~` never matches `git status` —
- * it falls through to the classifier instead. Rules never see the model.
+ * `git status`, `npm run *`. It matches a command only when that command is a flat argument
+ * vector, so `git status $(curl x)` never matches `git status` — it falls through to the
+ * classifier instead. A command *chain* (`a && b`, `a; b`, `a | b`) is split at the top level and
+ * every command in it is matched on its own, so `git add -A && git commit -m wip` is matchable.
+ *
+ * Two tiers, because a block the user cannot lift is not a policy they need: `allow` runs without
+ * a model request, `ask` prompts (and blocks when no UI is available). The most specific matching
+ * rule governs each command — otherwise the `git commit -m wip` allow rule a user just persisted
+ * from the dialog could never outrank the `git commit *` ask rule that produced the dialog.
  *
  * Config shape, at `<project>/.omp/auto-mode.json` and `<agent dir>/auto-mode.json`:
- * `{ "allow": ["git status", "npm run *"], "deny": ["git push --force *"] }`. Deny always wins.
+ * `{ "allow": ["git status", "npm run *"], "ask": ["git push *"] }`.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export type Rule = readonly string[];
 
+/** One command as an argument vector, and a top-level chain of them. */
+export type Argv = readonly string[];
+export type Chain = readonly Argv[];
+
+export type Tier = "allow" | "ask";
+
 export interface Rules {
   readonly allow: readonly Rule[];
-  readonly deny: readonly Rule[];
+  readonly ask: readonly Rule[];
 }
 
-export const EMPTY_RULES: Rules = { allow: [], deny: [] };
+/** The deciding rule is only meaningful for `ask`: an allowed chain is allowed by one rule per command. */
+export type Decision = { readonly tier: "allow" } | { readonly tier: "ask"; readonly rule: Rule };
 
 export class InvalidRule extends Error {}
 
 // ---------------------------------------------------------------------------
-// Commands → argv
+// Commands → argv chain
 // ---------------------------------------------------------------------------
 
-/** Characters that give a command shell semantics beyond a flat argument list. */
-const METACHARS = /[;&|<>()$`\\\n*?[\]{}~!#]/;
+/**
+ * Characters that give a command semantics the rule layer does not model. `;`, `|` and `&` are
+ * absent because they are handled explicitly below: the first two split a chain, the third is
+ * ambiguous (`&>` redirect, `&&` chain, or a lone backgrounding `&`).
+ */
+const METACHARS = /[<>()$`\\\n*?[\]{}~!#]/;
 
 /**
  * The only redirection targets the rule layer vouches for. Sending a stream to `/dev/null` or
  * duplicating one onto another (`2>&1`) changes where output goes, never what executes or which
  * files are touched. Any real file target — `> out.txt`, `< secret` — is refused.
  */
-const NULL_TARGET = /^[ \t]*\/dev\/null(?=$|[\s"'])/;
-const FD_DUP = /^[ \t]*&[12](?=$|[\s"'])/;
+const NULL_TARGET = /^[ \t]*\/dev\/null(?=$|[\s"';|&])/;
+const FD_DUP = /^[ \t]*&[12](?=$|[\s"';|&])/;
 
 /**
- * Split a command into arguments, or `undefined` when it cannot be trusted as a flat argv:
- * any metacharacter, expansion, unbalanced quote, or escape disqualifies it. Plain `"…"` and
- * `'…'` quoting is honoured so that `git commit -m "fix: x"` remains matchable, and
- * redirections to `/dev/null` or between descriptors are dropped rather than refused.
+ * Split a command line into one argv per command, or `undefined` when it cannot be trusted as a
+ * flat chain: any expansion, glob, unbalanced quote, escape, backgrounding, real redirection, or
+ * compound construct (`if`, `for`, `( … )`, `{ … }`) disqualifies the whole line. Plain `"…"` and
+ * `'…'` quoting is honoured so that `git commit -m "fix: x"` remains matchable, and redirections
+ * to `/dev/null` or between descriptors are dropped rather than refused.
  */
-export const tokenize = (command: string): readonly string[] | undefined => {
-  const argv: string[] = [];
+export const tokenize = (command: string): Chain | undefined => {
+  const chain: Argv[] = [];
+  let argv: string[] = [];
   let current = "";
   let inToken = false;
   let quote: '"' | "'" | undefined;
+  let dangling = false;
+
+  /** End the current command; a separator with nothing before it is not a chain we understand. */
+  const cut = (): boolean => {
+    if (inToken) argv.push(current);
+    current = "";
+    inToken = false;
+    if (argv.length === 0) return false;
+    chain.push(argv);
+    argv = [];
+    return true;
+  };
 
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i]!;
@@ -69,9 +100,15 @@ export const tokenize = (command: string): readonly string[] | undefined => {
       inToken = false;
       continue;
     }
-    if (ch === "&") {
+    if (ch === ";" || ch === "|" || ch === "&") {
       // `&>` / `&>>` redirect both streams; the `>` is handled on the next iteration.
-      if (command[i + 1] !== ">") return undefined;
+      if (ch === "&" && command[i + 1] === ">") continue;
+      // `&&` and `||` chain; a lone `&` backgrounds the command, and `;;` is `case` syntax.
+      const doubled = command[i + 1] === ch;
+      if (ch === "&" ? !doubled : ch === ";" && doubled) return undefined;
+      if (!cut()) return undefined;
+      if (doubled) i += 1;
+      dangling = true;
       continue;
     }
     if (ch === ">" || ch === "<") {
@@ -86,15 +123,20 @@ export const tokenize = (command: string): readonly string[] | undefined => {
       const consumed = (ch === ">" ? FD_DUP.exec(rest) : null) ?? NULL_TARGET.exec(rest);
       if (consumed === null) return undefined;
       i = after + consumed[0].length - 1;
+      dangling = false;
       continue;
     }
     if (METACHARS.test(ch)) return undefined;
     current += ch;
     inToken = true;
+    dangling = false;
   }
   if (quote !== undefined) return undefined;
   if (inToken) argv.push(current);
-  return argv.length > 0 ? argv : undefined;
+  if (argv.length > 0) chain.push(argv);
+  // `a && ` or `a | ` is an unfinished command; only `;` may legitimately end a line.
+  else if (dangling && !command.trimEnd().endsWith(";")) return undefined;
+  return chain.length > 0 ? chain : undefined;
 };
 
 // ---------------------------------------------------------------------------
@@ -112,25 +154,48 @@ export const parseRule = (text: string): Rule => {
 
 export const formatRule = (rule: Rule): string => rule.join(" ");
 
-const matches = (rule: Rule, argv: readonly string[]): boolean => {
+const matches = (rule: Rule, argv: Argv): boolean => {
   const wildcard = rule.at(-1) === "*";
   const literal = wildcard ? rule.slice(0, -1) : rule;
   if (wildcard ? argv.length < literal.length : argv.length !== literal.length) return false;
   return literal.every((token, i) => token === argv[i]);
 };
 
-/** `deny` beats `allow`; `undefined` means no rule applies and the classifier should decide. */
-export const decide = (rules: Rules, argv: readonly string[]): "allow" | "deny" | undefined => {
-  if (rules.deny.some((rule) => matches(rule, argv))) return "deny";
-  if (rules.allow.some((rule) => matches(rule, argv))) return "allow";
-  return undefined;
+/** Literal tokens matched, with an exact rule beating a wildcard one of the same length. */
+const specificity = (rule: Rule): number =>
+  rule.at(-1) === "*" ? (rule.length - 1) * 2 : rule.length * 2 + 1;
+
+/** The rule that governs one command: the most specific match, `ask` winning a tie. */
+const govern = (rules: Rules, argv: Argv): { tier: Tier; rule: Rule } | undefined => {
+  let best: { tier: Tier; rule: Rule; score: number } | undefined;
+  for (const tier of ["allow", "ask"] as const) {
+    for (const rule of rules[tier]) {
+      if (!matches(rule, argv)) continue;
+      const score = specificity(rule);
+      if (best === undefined || score > best.score || (score === best.score && tier === "ask")) {
+        best = { tier, rule, score };
+      }
+    }
+  }
+  return best;
+};
+
+/**
+ * Decide a whole chain: one `ask` anywhere asks, and the chain is allowed only when every command
+ * in it is. `undefined` means no rule covers some command and the classifier should decide.
+ */
+export const decide = (rules: Rules, chain: Chain): Decision | undefined => {
+  const governing = chain.map((argv) => govern(rules, argv));
+  const asked = governing.find((rule) => rule?.tier === "ask");
+  if (asked !== undefined) return { tier: "ask", rule: asked.rule };
+  return governing.every((rule) => rule !== undefined) ? { tier: "allow" } : undefined;
 };
 
 /**
  * Rules a user might want to persist after approving `argv`: the exact command, and — when it has
  * arguments beyond the first two tokens — the `<cmd> <sub> *` prefix.
  */
-export const suggestRules = (argv: readonly string[]): readonly Rule[] => {
+export const suggestRules = (argv: Argv): readonly Rule[] => {
   const exact: Rule = argv;
   if (argv.length <= 2) return [exact];
   return [exact, [...argv.slice(0, 2), "*"]];
@@ -142,7 +207,7 @@ export const suggestRules = (argv: readonly string[]): readonly Rule[] => {
 
 interface RulesFile {
   readonly allow?: readonly string[];
-  readonly deny?: readonly string[];
+  readonly ask?: readonly string[];
 }
 
 const readRulesFile = async (path: string): Promise<RulesFile> => {
@@ -155,6 +220,12 @@ const readRulesFile = async (path: string): Promise<RulesFile> => {
   }
   const data: unknown = JSON.parse(raw);
   if (typeof data !== "object" || data === null) throw new InvalidRule(`${path}: must be an object`);
+  // A dropped tier must fail loudly: silently ignoring "deny" would turn a hard block into nothing.
+  if ("deny" in data) {
+    throw new InvalidRule(
+      `${path}: "deny" is no longer a tier; move those rules to "ask" (an ask rule blocks when no UI is available)`,
+    );
+  }
   const list = (key: string, value: unknown): readonly string[] => {
     if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
       throw new InvalidRule(`${path}: "${key}" must be an array of strings`);
@@ -164,7 +235,7 @@ const readRulesFile = async (path: string): Promise<RulesFile> => {
   // Keep only the keys the file actually has, so a rewrite does not invent empty ones.
   return {
     ...("allow" in data ? { allow: list("allow", data.allow) } : {}),
-    ...("deny" in data ? { deny: list("deny", data.deny) } : {}),
+    ...("ask" in data ? { ask: list("ask", data.ask) } : {}),
   };
 };
 
@@ -173,7 +244,7 @@ export const loadRules = async (paths: readonly string[]): Promise<Rules> => {
   const files = await Promise.all(paths.map(readRulesFile));
   return {
     allow: files.flatMap((file) => (file.allow ?? []).map(parseRule)),
-    deny: files.flatMap((file) => (file.deny ?? []).map(parseRule)),
+    ask: files.flatMap((file) => (file.ask ?? []).map(parseRule)),
   };
 };
 

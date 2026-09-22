@@ -10,20 +10,20 @@ Prototype "auto-mode" for `omp`: classifies a pending tool call as `safe` / `ask
 src/cli.ts ──────────────────────────┐
                                      ├──▶ src/classifier.ts ──▶ Jev (one systemOne request) ──▶ route() ──▶ Verdict
 src/extension.ts ──▶ src/rules.ts ───┘
-                     (allow/deny, no API call)
+                     (allow/ask, no API call)
 ```
 
 - `classifier.ts` is the engine. `HAZARDS` is a battery of 7 **Noul** (yes/no) questions; `classify(calls, options)` asks every hazard for every call in **one** `client.systemOne()` request (question ids `${hazard}_${i}`, state = `{ environment, project_dir, tool_calls }`), then `route()` turns each call's probabilities into a label.
 - `route()` policy (code owns it, the model only supplies probabilities): any `severity: "unsafe"` hazard ≥ `fire` → `unsafe`; any hazard ≥ `fire`, or any specific hazard in `[clear, fire)` → `ask`; otherwise `safe`. `safe` therefore means *every* hazard came back near zero, not that safe won a relative vote.
 - `other_risk` is the catch-all hazard and is `fireOnly`: a mid-range probability on a fuzzy question means "mildly consequential", not "model unsure about a fact", so it never routes to `ask` from the uncertain band alone. Keep that asymmetry when adding hazards: crisp hazards get the band, fuzzy ones do not.
 - The extension (`src/extension.ts`) gates `GATED_TOOLS` only (read-tier tools are skipped), flattens/truncates inputs via `toClassifierInput`, and maps labels: `safe` → pass, `unsafe` → `{ block, reason }`, `ask` → `askUser` select dialog (block when `!ctx.hasUI`). Classifier/API failure **fails open** to omp's built-in approval gate — a Jev outage must not brick the session.
-- `rules.ts` is the deterministic layer in front of the model, bash only: `tokenize()` accepts a command only as a flat argv with **no shell metacharacters** (else `undefined` → classifier decides); the one exception is redirections that cannot touch a file (`/dev/null` targets, `2>&1` dups), which are dropped so harness-style `cmd 2>&1` still matches. `decide()` matches token rules with an optional trailing `*`, deny beats allow. Rules come from `<cwd>/.omp/auto-mode.json` + `<getAgentDir()>/auto-mode.json`, re-read on every gated call. The `ask` dialog (`ctx.ui.select`) can append an allow rule to the project file via `appendAllowRule` (de-duplicated); "always allow" is only offered when `tokenize` succeeded, so persisted rules are always matchable. Never widen `tokenize` to a real file target — `> ~/.zshrc` is how an allowlisted command becomes destructive.
+- `rules.ts` is the deterministic layer in front of the model, bash only. Two tiers, not three: `allow` runs without a model request and `ask` always prompts (blocking when `!ctx.hasUI`, which is the only block a rule can produce — a tier the user cannot say yes to is just a worse `ask`). `tokenize()` returns one argv per command in a top-level chain (`a && b`, `a; b`, `a | b`) or `undefined` when anything is unmodelled — expansions, globs, `~`, real redirect targets, backgrounding `&`, `if`/`for`/`{ … }` — in which case the classifier decides; redirections that cannot touch a file (`/dev/null` targets, `2>&1` dups) are dropped so harness-style `cmd 2>&1` still matches. `decide()` picks the **most specific** matching rule per command (literal token count, exact beats wildcard, `ask` wins a tie), then asks if any command asks and allows only if every command is covered; specificity is what lets a persisted `git commit -m wip` allow rule outrank the `git commit *` ask rule that raised the dialog. A leftover `deny` key in a rules file throws `InvalidRule` rather than silently vanishing. Rules come from `<cwd>/.omp/auto-mode.json` + `<getAgentDir()>/auto-mode.json`, re-read on every gated call. `appendAllowRule` persists an "always allow" choice to the project file (de-duplicated), offered only for a single-command chain — persisting a rule for one half of `a && b` would allow that half alone. Never widen `tokenize` to a real file target — `> ~/.zshrc` is how an allowlisted command becomes destructive.
 
 ## Key Directories
 
 - `src/` — engine (`classifier.ts`), rules layer (`rules.ts`), shared batch-file parser (`calls.ts`), CLI, extension. No subfolders.
 - `test/classifier.test.ts` — fixture regression on the live API. `test/rules.test.ts` — pure unit tests for tokenizing, matching, and the rules files; add boundary cases here, never to the fixture.
-- `fixtures/tool-calls.json` — the regression corpus: 24 labelled calls in the same `{ project_dir, calls[{id,tool,input,expected}] }` shape the CLI's batch mode accepts (`expected` is ignored there).
+- `fixtures/tool-calls.json` — the regression corpus: 27 labelled calls in the same `{ project_dir, calls[{id,tool,input,expected}] }` shape the CLI's batch mode accepts (`expected` is ignored there).
 
 ## Development Commands
 
@@ -54,7 +54,7 @@ src/extension.ts ──▶ src/rules.ts ───┘
 - `src/cli.ts` — `bin` entry; batch vs command mode split on `argv.indexOf("--")`.
 - `src/calls.ts` — `parseCallsFile`; the one place the JSON batch/fixture shape is validated.
 - `src/extension.ts` — `omp` default-export factory; `GATED_TOOLS`, `MAX_VALUE_CHARS`.
-- `src/rules.ts` — `tokenize`, `decide`, `suggestRules`, `loadRules`, `appendAllowRule`; `METACHARS` is the security boundary.
+- `src/rules.ts` — `tokenize`, `decide`, `suggestRules`, `loadRules`, `appendAllowRule`; `METACHARS` plus the explicit `;`/`|`/`&` handling in `tokenize` is the security boundary.
 - `fixtures/tool-calls.json` — borderline pairs worth preserving: `append-zshrc` (ask) vs `overwrite-zshrc` (unsafe), `git-push-branch` (ask) vs `force-push-main` (unsafe).
 - `package.json` — scripts, `bin`, `omp.extensions`, `engines.node >=23.6`.
 

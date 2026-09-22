@@ -57,27 +57,41 @@ omp plugin link /path/to/omp-auto-mode
 
 The extension gates `bash`, `write`, `edit`, `eval`, and `ast_edit`. Read-only tools are not classified. If the classifier itself is unreachable, the call falls through to omp's normal approval instead of failing closed.
 
-### Allow and deny rules
+### Allow and ask rules
 
-Commands you trust (or never want run) can bypass the model entirely. Rules live in
-`<project>/.omp/auto-mode.json` and `~/.omp/agent/auto-mode.json` (merged; deny always wins):
+Commands you trust (or always want to approve by hand) can skip the model entirely. Rules live in
+`<project>/.omp/auto-mode.json` and `~/.omp/agent/auto-mode.json`, merged:
 
 ```json
 {
   "allow": ["git status", "git diff *", "npm run *", "ls *"],
-  "deny": ["git push --force *"]
+  "ask": ["git commit *", "git push *"]
 }
 ```
 
-A rule is a list of tokens with an optional trailing `*` meaning "any further arguments". Rules
-match only commands that are a flat argument list — no `;`, `&&`, `|`, `$(…)`, globs, expansions,
-or redirects to real files — so `git status; rm -rf ~` never matches `git status`; it goes to the
-classifier. Redirects that cannot touch a file (`>/dev/null`, `2>/dev/null`, `2>&1`) are ignored
+- `allow` — runs without a model request.
+- `ask` — always prompts, even for something the classifier rates `safe` (a local commit destroys
+  nothing and sends nothing, so hazard scoring will never stop it for you). With no UI available
+  — `-p`, CI — an `ask` rule blocks, which is also the only block a rule can produce: a tier you
+  cannot say yes to would just be a worse version of this one.
+
+A rule is a list of tokens with an optional trailing `*` meaning "any further arguments". The
+**most specific** matching rule governs a command — literal tokens counted, exact beating wildcard,
+`ask` winning a tie — so the `git commit -m wip` allow rule you persist from a dialog outranks the
+`git commit *` ask rule that raised it.
+
+A command chain (`a && b`, `a; b`, `a | b`) is split and matched command by command: it asks if
+**any** command asks, and is allowed only when **every** command is. Anything the matcher does not
+model — `$(…)`, backticks, expansions, globs, `~`, redirects to real files, backgrounding `&`,
+`if`/`for`/`{ … }` — matches no rule at all and goes to the classifier, so `git status $(curl evil)`
+never matches `git status`. Redirects that cannot touch a file (`>/dev/null`, `2>&1`) are ignored
 for matching, so `npm test 2>&1` matches an `npm test` rule.
 
-When a call is classified `ask`, the dialog offers **Allow once**, **Always allow** (the exact
-command, and its `<cmd> <sub> *` prefix when longer), and **Deny**. Choosing *Always allow* appends
-the rule to the project file, so the list grows from real decisions.
+When a call is classified `ask` — by a rule or by the model — the dialog offers **Allow once**,
+**Always allow** (the exact command, and its `<cmd> <sub> *` prefix when longer), and **Deny**.
+Choosing *Always allow* appends the rule to the project file, so the list grows from real
+decisions. It is offered only for a single command: persisting a rule for one half of `a && b`
+would allow that half on its own, which you never approved.
 
 ## CLI
 
