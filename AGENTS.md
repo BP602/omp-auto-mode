@@ -31,7 +31,7 @@ src/extension.ts ──▶ src/rules.ts ───┘
 - `npm test` — typecheck, then `node --test`; **spends API tokens** (~27 k input per run) against the live model. One subtest per fixture call plus one asserting exactly one HTTP request.
 - `node src/cli.ts -- <command…>` / `node src/cli.ts <calls.json>` — JSON envelope on stdout (`--project-dir`, `--fire`, `--clear`, `--model` go before `--`). Also spends tokens.
 - `omp -e . ` / `omp plugin link .` — load the extension (manifest: `package.json#omp.extensions`). Headless smoke: `omp -p --no-extensions -e . --mode json "…"` and inspect `tool_execution_end` events.
-- Requires `TYPESAFE_API_KEY` in the environment (CLI exits 2 without it). Never print or persist it.
+- Two credential paths for the same key, and they are not interchangeable: the **extension** resolves it from omp's credential store via `ctx.modelRegistry.getApiKeyForProvider("typesafe")` (what `/login typesafe` and `omp token typesafe` use), re-resolved per classified call and passed as `ClassifyOptions.apiKey`; the **CLI and tests** have no `ExtensionContext` and rely on `TYPESAFE_API_KEY` in the environment (CLI exits 2 without it). `classify` omits `apiKey` when undefined, so the SDK's own env fallback still applies. Never print or persist the key.
 
 ## Code Conventions & Common Patterns
 

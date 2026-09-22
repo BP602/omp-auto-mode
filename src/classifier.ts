@@ -60,6 +60,8 @@ export interface ClassifyOptions {
   readonly projectDir: string;
   /** Jev model or alias; defaults to the SDK default (`jev-latest`). */
   readonly model?: string;
+  /** Credential to use; the SDK falls back to `TYPESAFE_API_KEY` when omitted. */
+  readonly apiKey?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +230,7 @@ export const classify = async (
   // Count HTTP calls so callers can assert the single-request invariant; retries count too.
   let requests = 0;
   const client = new TypeSafeClient({
+    ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
     fetch: (input, init) => {
       requests += 1;
       return globalThis.fetch(input, init);

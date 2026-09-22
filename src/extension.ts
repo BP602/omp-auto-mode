@@ -10,6 +10,8 @@
  *              Blocked when no UI is available.
  * - `unsafe` → the call is blocked and the reason is returned to the model.
  *
+ * The Jev credential comes from omp's own credential store (`/login typesafe`), resolved per call
+ * so a mid-session login takes effect; `TYPESAFE_API_KEY` still works as the SDK's own fallback.
  * If the classifier itself fails (network, quota, bad key) the call falls through to omp's
  * built-in approval instead of failing closed, so a Jev outage cannot brick a session.
  */
@@ -25,6 +27,9 @@ import { appendAllowRule, decide, formatRule, loadRules, suggestRules, tokenize,
 const GATED_TOOLS: Record<string, true> = { bash: true, write: true, edit: true, eval: true, ast_edit: true };
 
 const RULES_FILE = "auto-mode.json";
+
+/** omp's provider id for the Jev backend; `omp token typesafe` reads the same credential. */
+const TYPESAFE_PROVIDER = "typesafe";
 
 /** Longest string value forwarded to the model; the hazards judge effect, not full file bodies. */
 const MAX_VALUE_CHARS = 2_000;
@@ -118,7 +123,12 @@ export default function autoMode(pi: ExtensionAPI): void {
 
     let verdict: Verdict;
     try {
-      const result = await classify([call], { thresholds: DEFAULT_THRESHOLDS, projectDir: ctx.cwd });
+      const apiKey = await ctx.modelRegistry.getApiKeyForProvider(TYPESAFE_PROVIDER);
+      const result = await classify([call], {
+        thresholds: DEFAULT_THRESHOLDS,
+        projectDir: ctx.cwd,
+        ...(apiKey === undefined ? {} : { apiKey }),
+      });
       verdict = result.verdicts[0]!;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

@@ -41,7 +41,7 @@ Because each hazard is an absolute judgment, `safe` means *every* hazard came ba
 
 ## Install
 
-Requires Node ≥ 23.6 (runs TypeScript natively) and a `TYPESAFE_API_KEY` in your environment.
+Requires Node ≥ 23.6 (runs TypeScript natively) and a TypeSafe credential.
 
 ```bash
 git clone https://github.com/alexsatch/omp-auto-mode
@@ -54,6 +54,11 @@ Load it into `omp` for one session, or link it permanently:
 omp -e /path/to/omp-auto-mode
 omp plugin link /path/to/omp-auto-mode
 ```
+
+The extension takes its credential from omp's own credential store — `/login typesafe`, or
+whatever `omp token typesafe` already resolves — so no environment variable is needed. It is
+re-resolved on every classified call, so logging in mid-session takes effect immediately.
+`TYPESAFE_API_KEY` still works as a fallback, and is what the CLI below uses.
 
 The extension gates `bash`, `write`, `edit`, `eval`, and `ast_edit`. Read-only tools are not classified. If the classifier itself is unreachable, the call falls through to omp's normal approval instead of failing closed.
 
