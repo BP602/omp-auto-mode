@@ -29,10 +29,21 @@ registerHooks({
         format: "module",
         source: `
           export const DEFAULT_THRESHOLDS = { fire: 0.7, clear: 0.3 };
-          export const describeVerdict = () => "unused";
-          export const classify = async (_calls, options) => {
+          export const describeVerdict = (verdict) => verdict.id;
+          export const classify = async (calls, options) => {
+            globalThis.__autoModeTestClassifications = (globalThis.__autoModeTestClassifications ?? 0) + 1;
             globalThis.__autoModeTestThresholds = options.thresholds;
-            throw new Error("classifier offline");
+            const label = globalThis.__autoModeTestLabel;
+            if (label === undefined) throw new Error("classifier offline");
+            return {
+              verdicts: calls.map((call) => ({
+                id: call.id,
+                label,
+                hazards: {},
+                triggered: [],
+                uncertain: [],
+              })),
+            };
           };
         `,
         shortCircuit: true,
@@ -45,10 +56,12 @@ registerHooks({
 const autoMode = (await import("../src/extension.ts")).default;
 
 type ToolResult = { readonly block: true; readonly reason: string } | undefined;
-type ToolHandler = (
-  event: { readonly toolName: string; readonly toolCallId: string; readonly input: Record<string, unknown> },
-  context: unknown,
-) => Promise<ToolResult>;
+interface ToolEvent {
+  readonly toolName: string;
+  readonly toolCallId: string;
+  readonly input: Record<string, unknown>;
+}
+type ToolHandler = (event: ToolEvent, context: unknown) => Promise<ToolResult>;
 
 let handler: ToolHandler | undefined;
 const info: string[] = [];
@@ -98,8 +111,23 @@ after(async () => {
   await rm(cwd, { recursive: true, force: true });
 });
 
-const invoke = async (
-  command: string,
+const setClassifier = (label: "safe" | "ask" | "unsafe" | undefined): void => {
+  (globalThis as unknown as { __autoModeTestLabel: string | undefined }).__autoModeTestLabel = label;
+  (globalThis as { __autoModeTestClassifications?: number }).__autoModeTestClassifications = 0;
+};
+
+const classificationCount = (): number =>
+  (globalThis as { __autoModeTestClassifications?: number }).__autoModeTestClassifications ?? 0;
+
+const setThresholds = async (fire: number, clear: number): Promise<void> => {
+  const path = join(cwd, ".omp", "auto-mode.json");
+  const config = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  config["thresholds"] = { fire, clear };
+  await writeFile(path, JSON.stringify(config));
+};
+
+const invokeTool = async (
+  event: ToolEvent,
   hasUI: boolean,
   selection: string | readonly string[] = "Allow once",
   edits: readonly (string | undefined)[] = [],
@@ -112,36 +140,41 @@ const invoke = async (
   const choices = typeof selection === "string" ? [selection] : selection;
   let choiceIndex = 0;
   let editIndex = 0;
-  const result = await toolCall()(
-    { toolName: "bash", toolCallId: "call-1", input: { command } },
-    {
-      cwd,
-      hasUI,
-      ui: {
-        select: async (prompt: string, offered: readonly (string | { readonly label: string })[]) => {
-          const labels = offered.map((option) => (typeof option === "string" ? option : option.label));
-          dialogs.push({ title: prompt, options: labels });
-          if (title === undefined) {
-            title = prompt;
-            options.push(...labels);
-          }
-          const choice = choices[choiceIndex];
-          choiceIndex += 1;
-          return choice;
-        },
-        editor: async (prompt: string, prefill: string | undefined) => {
-          editors.push({ title: prompt, prefill });
-          const edited = edits[editIndex];
-          editIndex += 1;
-          return edited;
-        },
-        notify: (message: string) => notifications.push(message),
+  const result = await toolCall()(event, {
+    cwd,
+    hasUI,
+    ui: {
+      select: async (prompt: string, offered: readonly (string | { readonly label: string })[]) => {
+        const labels = offered.map((option) => (typeof option === "string" ? option : option.label));
+        dialogs.push({ title: prompt, options: labels });
+        if (title === undefined) {
+          title = prompt;
+          options.push(...labels);
+        }
+        const choice = choices[choiceIndex];
+        choiceIndex += 1;
+        return choice;
       },
-      modelRegistry: { getApiKeyForProvider: async () => undefined },
+      editor: async (prompt: string, prefill: string | undefined) => {
+        editors.push({ title: prompt, prefill });
+        const edited = edits[editIndex];
+        editIndex += 1;
+        return edited;
+      },
+      notify: (message: string) => notifications.push(message),
     },
-  );
+    modelRegistry: { getApiKeyForProvider: async () => undefined },
+  });
   return { result, title, options, notifications, dialogs, editors };
 };
+
+const invoke = async (
+  command: string,
+  hasUI: boolean,
+  selection: string | readonly string[] = "Allow once",
+  edits: readonly (string | undefined)[] = [],
+): Promise<Invocation> =>
+  invokeTool({ toolName: "bash", toolCallId: "call-1", input: { command } }, hasUI, selection, edits);
 
 describe("extension failure handling", () => {
   it("turns a classifier error into a one-call approval without a persistent bypass", async () => {
@@ -282,5 +315,65 @@ describe("extension rule persistence", () => {
     assert.equal(invocation.result, undefined);
     assert.equal(invocation.dialogs.length, 1);
     assert.deepEqual(invocation.notifications, []);
+  });
+});
+
+describe("extension verdict cache", () => {
+  it("reuses a verdict for canonically equal input but prompts for each ask", async () => {
+    await setThresholds(0.51, 0.4);
+    setClassifier("ask");
+    const first = await invokeTool(
+      { toolName: "write", toolCallId: "cache-canonical-1", input: { path: "src/cache.txt", content: "x" } },
+      true,
+    );
+    const second = await invokeTool(
+      { toolName: "write", toolCallId: "cache-canonical-2", input: { content: "x", path: "src/cache.txt" } },
+      true,
+    );
+
+    assert.equal(first.dialogs.length, 1);
+    assert.equal(second.dialogs.length, 1);
+    assert.equal(classificationCount(), 1);
+    assert.match(info.at(-1) ?? "", /cache-canonical-2/);
+  });
+
+  it("drops cached verdicts when effective thresholds change", async () => {
+    await setThresholds(0.52, 0.4);
+    setClassifier("safe");
+    await invoke("cargo cache-thresholds", false);
+    await invoke("cargo cache-thresholds", false);
+    assert.equal(classificationCount(), 1);
+
+    await setThresholds(0.53, 0.4);
+    await invoke("cargo cache-thresholds", false);
+    assert.equal(classificationCount(), 2);
+    assert.deepEqual(
+      (globalThis as { __autoModeTestThresholds?: unknown }).__autoModeTestThresholds,
+      { fire: 0.53, clear: 0.4 },
+    );
+  });
+
+  it("evicts the least recently used verdict at the session bound", async () => {
+    await setThresholds(0.54, 0.4);
+    setClassifier("safe");
+    await invoke("cargo cache-oldest", false);
+    for (let index = 0; index < 127; index += 1) {
+      await invoke(`cargo cache-${index}`, false);
+    }
+    await invoke("cargo cache-oldest", false);
+    await invoke("cargo cache-overflow", false);
+    await invoke("cargo cache-oldest", false);
+    await invoke("cargo cache-0", false);
+
+    assert.equal(classificationCount(), 130);
+  });
+
+  it("does not cache classifier failures", async () => {
+    await setThresholds(0.55, 0.4);
+    setClassifier(undefined);
+    await invoke("cargo cache-failure", true);
+    await invoke("cargo cache-failure", true);
+
+    assert.equal(classificationCount(), 2);
   });
 });

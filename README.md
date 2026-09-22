@@ -119,6 +119,11 @@ the classifier. A trustworthy path matcher would have to reproduce omp's handlin
 edit destinations. A simpler matcher would create an allow-rule bypass, so auto-mode does not
 maintain a second path-policy implementation.
 
+Within one extension session, successful classifier verdicts use a 128-entry least-recently-used
+cache keyed by project directory, tool, and the canonical input sent to Jev. Changing the effective
+thresholds clears the cache. Classifier failures are never cached, and a cached `ask` verdict still
+opens a fresh approval dialog for every call.
+
 When a call is classified `ask` by a rule or by the model, the dialog offers **Allow once**,
 suggested **Always allow** rules, **Edit allow rule**, and **Deny**. The editor starts with the
 wildcard suggestion, accepts the same trailing-`*` grammar as the config file, and keeps the user

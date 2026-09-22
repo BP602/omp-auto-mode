@@ -54,6 +54,9 @@ const MAX_VALUE_CHARS = 2_000;
 /** Longest input summary shown in the approval dialog. */
 const MAX_SUMMARY_CHARS = 400;
 
+/** Maximum successful classifier verdicts retained for one extension session. */
+const MAX_VERDICT_CACHE_ENTRIES = 128;
+
 const truncate = (text: string, max: number): string =>
   text.length > max ? `${text.slice(0, max)}… [truncated ${text.length - max} chars]` : text;
 
@@ -67,6 +70,12 @@ const toClassifierInput = (input: object): ToolCall["input"] => {
     else out[key] = truncate(JSON.stringify(value), MAX_VALUE_CHARS);
   }
   return out;
+};
+
+/** Canonical key for exactly the state that can affect a call's classification. */
+const verdictCacheKey = (call: ToolCall, projectDir: string): string => {
+  const entries = Object.entries(call.input).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return JSON.stringify([projectDir, call.tool, entries]);
 };
 
 /** The raw command when this is a well-formed bash tool call. */
@@ -140,6 +149,9 @@ const askUser = async (
 };
 
 export default function autoMode(pi: ExtensionAPI): void {
+  const verdictCache = new Map<string, Verdict>();
+  let cachedThresholds: string | undefined;
+
   pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
     if (!GATED_TOOLS[event.toolName]) return;
 
@@ -167,6 +179,11 @@ export default function autoMode(pi: ExtensionAPI): void {
       { project: join(ctx.cwd, ".omp", RULES_FILE), agent: join(getAgentDir(), RULES_FILE) },
       DEFAULT_THRESHOLDS,
     );
+    const thresholdKey = `${rules.thresholds.fire}:${rules.thresholds.clear}`;
+    if (cachedThresholds !== thresholdKey) {
+      verdictCache.clear();
+      cachedThresholds = thresholdKey;
+    }
     const chain = command === undefined ? undefined : tokenize(command);
     if (chain !== undefined) {
       const ruled = decide(rules, chain);
@@ -179,19 +196,31 @@ export default function autoMode(pi: ExtensionAPI): void {
     }
 
     let verdict: Verdict;
-    try {
-      const apiKey = await ctx.modelRegistry.getApiKeyForProvider(TYPESAFE_PROVIDER);
-      const result = await classify([call], {
-        thresholds: rules.thresholds,
-        projectDir: ctx.cwd,
-        ...(apiKey === undefined ? {} : { apiKey }),
-      });
-      verdict = result.verdicts[0]!;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      pi.logger.warn(`auto-mode: classification failed for ${event.toolName}; asking: ${message}`);
-      ctx.ui.notify(`auto-mode: classifier unavailable (${message})`, "warning");
-      return prompt(`classifier unavailable, treated as ask (${message})`, undefined);
+    const cacheKey = verdictCacheKey(call, ctx.cwd);
+    const cached = verdictCache.get(cacheKey);
+    if (cached !== undefined) {
+      verdictCache.delete(cacheKey);
+      verdictCache.set(cacheKey, cached);
+      verdict = { ...cached, id: call.id };
+    } else {
+      try {
+        const apiKey = await ctx.modelRegistry.getApiKeyForProvider(TYPESAFE_PROVIDER);
+        const result = await classify([call], {
+          thresholds: rules.thresholds,
+          projectDir: ctx.cwd,
+          ...(apiKey === undefined ? {} : { apiKey }),
+        });
+        verdict = result.verdicts[0]!;
+        if (verdictCache.size >= MAX_VERDICT_CACHE_ENTRIES) {
+          verdictCache.delete(verdictCache.keys().next().value!);
+        }
+        verdictCache.set(cacheKey, verdict);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        pi.logger.warn(`auto-mode: classification failed for ${event.toolName}; asking: ${message}`);
+        ctx.ui.notify(`auto-mode: classifier unavailable (${message})`, "warning");
+        return prompt(`classifier unavailable, treated as ask (${message})`, undefined);
+      }
     }
 
     const reason = describeVerdict(verdict);
