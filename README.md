@@ -113,6 +113,12 @@ model — `$(…)`, backticks, expansions, globs, `~`, redirects to real files, 
 never matches `git status`. Redirects that cannot touch a file (`>/dev/null`, `2>&1`) are ignored
 for matching, so `npm test 2>&1` matches an `npm test` rule.
 
+Rules deliberately apply only to `bash`. `write`, `edit`, `eval`, and `ast_edit` always go through
+the classifier. A trustworthy path matcher would have to reproduce omp's handling of symlinks,
+`..` and absolute escapes, internal URLs, archive and database selectors, globs, and multi-file
+edit destinations. A simpler matcher would create an allow-rule bypass, so auto-mode does not
+maintain a second path-policy implementation.
+
 When a call is classified `ask` by a rule or by the model, the dialog offers **Allow once**,
 suggested **Always allow** rules, **Edit allow rule**, and **Deny**. The editor starts with the
 wildcard suggestion, accepts the same trailing-`*` grammar as the config file, and keeps the user
