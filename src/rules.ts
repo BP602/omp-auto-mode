@@ -36,6 +36,41 @@ export type Decision = { readonly tier: "allow" } | { readonly tier: "ask"; read
 
 export class InvalidRule extends Error {}
 
+/**
+ * Raw command shapes that must retain an approval gate even when omp runs in `yolo` mode.
+ *
+ * This intentionally mirrors omp's `CRITICAL_BASH_PATTERNS`: yolo ignores the bare `override`
+ * returned by that list, so the extension has to enforce the prompt itself. Keep the two lists
+ * behaviorally aligned when updating the omp devDependency.
+ */
+const CRITICAL_BASH_PATTERNS = [
+  /\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rRfF][a-z]*|--recursive|--force)\s+(?:-\S+\s+)*\//i,
+  /\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
+  /\bsudo\s+rm\b/i,
+  /\bchmod\s+-R\s+[0-7]+\s+\//i,
+  /\bchmod\s+-R\s+[ugoa+\-=rwxXst,]+\s+\//,
+  /\bchown\s+-R\s+\S+\s+\//i,
+  /:\(\)\s*\{\s*:\s*\|\s*:/i,
+  />\s*\/dev\/sd[a-z]/i,
+  /\bmkfs(\.|\b)/i,
+  /\bdd\s+if=.+of=\/dev\//i,
+  /\bshred\s+\/dev\//i,
+  /\bcryptsetup\b/i,
+  />\s*\/etc\/(?:passwd|shadow|sudoers)\b/i,
+  /\btee\s+(?:-a\s+)?\/etc\/(?:passwd|shadow|sudoers)\b/i,
+  /\b(?:curl|wget|fetch)\b[^|]*\|\s*(?:bash|sh|zsh|fish)\b/i,
+  /(?:^|[\s;&|(])(?:bash|sh|zsh|source|\.)\s+<\(\s*(?:curl|wget|fetch)\b/i,
+  /\beval\s+["'`]?\$\(\s*(?:curl|wget|fetch)\b|\beval\s+`\s*(?:curl|wget|fetch)\b/i,
+  /\bkill\s+-9\s+1\b/,
+  /(?:^|[\s;&|(])(?:shutdown|poweroff|reboot|halt)(?:\s|$|[;|&])/i,
+  /(?:^|[\s;&|(])init\s+0\b/i,
+  /\bnc\b[^|;]*\s-[a-zA-Z]*[ec][a-zA-Z]*\s/i,
+] as const;
+
+/** Whether a raw bash command must prompt before user rules or the classifier can allow it. */
+export const isCriticalBash = (command: string): boolean =>
+  CRITICAL_BASH_PATTERNS.some((pattern) => pattern.test(command));
+
 // ---------------------------------------------------------------------------
 // Commands → argv chain
 // ---------------------------------------------------------------------------

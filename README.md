@@ -55,12 +55,27 @@ omp -e /path/to/omp-auto-mode
 omp plugin link /path/to/omp-auto-mode
 ```
 
-The extension takes its credential from omp's own credential store — `/login typesafe`, or
-whatever `omp token typesafe` already resolves — so no environment variable is needed. It is
+The extension takes its credential from omp's own credential store (`/login typesafe`, or
+whatever `omp token typesafe` already resolves), so no environment variable is needed. It is
 re-resolved on every classified call, so logging in mid-session takes effect immediately.
 `TYPESAFE_API_KEY` still works as a fallback, and is what the CLI below uses.
 
-The extension gates `bash`, `write`, `edit`, `eval`, and `ast_edit`. Read-only tools are not classified. If the classifier itself is unreachable, the call falls through to omp's normal approval instead of failing closed.
+Make auto-mode the sole approval gate; otherwise omp's native gate runs after the extension and
+can produce a second prompt:
+
+```yaml
+tools:
+  approvalMode: yolo
+```
+
+With `yolo`, no gate remains if the extension fails to load, so confirm that `omp plugin link`
+lists it before relying on this setup. While the extension is loaded, it gates `bash`, `write`,
+`edit`, `eval`, and `ast_edit`. Read-only tools are not classified.
+
+Raw bash commands first pass a deterministic critical-pattern backstop. Destructive host and disk
+operations, remote-fetch-then-execute shapes, and network shells prompt even if an `allow` rule
+matches and even if Jev is unavailable. A classifier error also prompts instead of falling through.
+Both cases block when no UI is available (`-p`, CI).
 
 ### Allow and ask rules
 
@@ -92,11 +107,14 @@ model — `$(…)`, backticks, expansions, globs, `~`, redirects to real files, 
 never matches `git status`. Redirects that cannot touch a file (`>/dev/null`, `2>&1`) are ignored
 for matching, so `npm test 2>&1` matches an `npm test` rule.
 
-When a call is classified `ask` — by a rule or by the model — the dialog offers **Allow once**,
+When a call is classified `ask` by a rule or by the model, the dialog offers **Allow once**,
 **Always allow** (the exact command, and its `<cmd> <sub> *` prefix when longer), and **Deny**.
 Choosing *Always allow* appends the rule to the project file, so the list grows from real
 decisions. It is offered only for a single command: persisting a rule for one half of `a && b`
 would allow that half on its own, which you never approved.
+
+Critical-pattern and classifier-error prompts offer only **Allow once** and **Deny**. An outage or
+backstop match cannot create a permanent bypass.
 
 ## CLI
 
@@ -132,7 +150,7 @@ npm run typecheck   # tsc --noEmit, free
 npm test            # typecheck, then node --test against the live API (~27k input tokens)
 ```
 
-The test suite is `test/classifier.test.ts` on `node:test`: it classifies every call in `fixtures/tool-calls.json` in one request and asserts each call's `expected` label. Jev's probabilities drift by a few hundredths between runs, so after changing hazard wording or thresholds run it a few times and fix flakes in the question text, not by widening thresholds. See [AGENTS.md](AGENTS.md) for the conventions.
+Tests use `node:test`. `test/rules.test.ts` and `test/extension.test.ts` cover deterministic policy and handler behavior without an API call. `test/classifier.test.ts` sends every call in `fixtures/tool-calls.json` in one live request and asserts each expected label. Jev probabilities drift by a few hundredths, so after changing hazard wording or thresholds run it a few times and fix flakes in the question text, not by widening thresholds. See [AGENTS.md](AGENTS.md) for the conventions.
 
 Known limitation: clearly hostile commands tend to light up unrelated hazards too (`mkfs` scores high on `exposes_secrets`). Labels are unaffected — it only over-fires on calls that are already unsafe — but the reason string for a hard block may list hazards that do not literally apply.
 
