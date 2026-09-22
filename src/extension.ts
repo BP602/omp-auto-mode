@@ -57,8 +57,12 @@ const MAX_SUMMARY_CHARS = 400;
 /** Maximum successful classifier verdicts retained for one extension session. */
 const MAX_VERDICT_CACHE_ENTRIES = 128;
 
-const truncate = (text: string, max: number): string =>
-  text.length > max ? `${text.slice(0, max)}… [truncated ${text.length - max} chars]` : text;
+const truncate = (text: string, max: number): string => {
+  if (text.length <= max) return text;
+  const tailLength = Math.floor(max / 2);
+  const headLength = max - tailLength;
+  return `${text.slice(0, headLength)}… [truncated ${text.length - max} chars]${text.slice(-tailLength)}`;
+};
 
 /** Flatten a tool input into the primitive record the classifier sends as state. */
 const toClassifierInput = (input: object): ToolCall["input"] => {

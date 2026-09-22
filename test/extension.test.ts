@@ -33,6 +33,7 @@ registerHooks({
           export const classify = async (calls, options) => {
             globalThis.__autoModeTestClassifications = (globalThis.__autoModeTestClassifications ?? 0) + 1;
             globalThis.__autoModeTestThresholds = options.thresholds;
+            globalThis.__autoModeTestCalls = calls;
             const label = globalThis.__autoModeTestLabel;
             if (label === undefined) throw new Error("classifier offline");
             return {
@@ -118,6 +119,14 @@ const setClassifier = (label: "safe" | "ask" | "unsafe" | undefined): void => {
 
 const classificationCount = (): number =>
   (globalThis as { __autoModeTestClassifications?: number }).__autoModeTestClassifications ?? 0;
+
+const classifiedInput = (): Record<string, string | number | boolean | null> => {
+  const calls = (globalThis as { __autoModeTestCalls?: readonly { readonly input: Record<string, string | number | boolean | null> }[] })
+    .__autoModeTestCalls;
+  const call = calls?.[0];
+  if (call === undefined) throw new Error("classifier was not called");
+  return call.input;
+};
 
 const setThresholds = async (fire: number, clear: number): Promise<void> => {
   const path = join(cwd, ".omp", "auto-mode.json");
@@ -315,6 +324,36 @@ describe("extension rule persistence", () => {
     assert.equal(invocation.result, undefined);
     assert.equal(invocation.dialogs.length, 1);
     assert.deepEqual(invocation.notifications, []);
+  });
+});
+
+describe("extension classifier input", () => {
+  it("keeps a string at the truncation boundary unchanged", async () => {
+    setClassifier("safe");
+    const content = `${"h".repeat(1_992)}tail-end`;
+    await invokeTool(
+      { toolName: "write", toolCallId: "truncate-boundary", input: { path: "src/boundary.txt", content } },
+      false,
+    );
+
+    assert.equal(content.length, 2_000);
+    assert.equal(classifiedInput()["content"], content);
+  });
+
+  it("preserves both ends of a string above the truncation boundary", async () => {
+    setClassifier("safe");
+    const content = `${"h".repeat(2_050)}DESTROY_AT_END`;
+    await invokeTool(
+      { toolName: "write", toolCallId: "truncate-balanced", input: { path: "src/balanced.txt", content } },
+      false,
+    );
+
+    const forwarded = classifiedInput()["content"];
+    if (typeof forwarded !== "string") assert.fail("classifier content was not a string");
+    assert.equal(forwarded.slice(0, 1_000), content.slice(0, 1_000));
+    assert.equal(forwarded.slice(-1_000), content.slice(-1_000));
+    assert.match(forwarded, /… \[truncated 64 chars\]/);
+    assert.equal(forwarded.endsWith("DESTROY_AT_END"), true);
   });
 });
 

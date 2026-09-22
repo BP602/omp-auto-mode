@@ -119,6 +119,10 @@ the classifier. A trustworthy path matcher would have to reproduce omp's handlin
 edit destinations. A simpler matcher would create an allow-rule bypass, so auto-mode does not
 maintain a second path-policy implementation.
 
+Classifier input values are capped at 2,000 source characters. Longer values keep the first and
+last 1,000 characters with an omission marker between them, so trailing commands or secrets remain
+visible without increasing the model-input budget.
+
 Within one extension session, successful classifier verdicts use a 128-entry least-recently-used
 cache keyed by project directory, tool, and the canonical input sent to Jev. Changing the effective
 thresholds clears the cache. Classifier failures are never cached, and a cached `ask` verdict still
