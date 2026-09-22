@@ -30,7 +30,10 @@ registerHooks({
         source: `
           export const DEFAULT_THRESHOLDS = { fire: 0.7, clear: 0.3 };
           export const describeVerdict = () => "unused";
-          export const classify = async () => { throw new Error("classifier offline"); };
+          export const classify = async (_calls, options) => {
+            globalThis.__autoModeTestThresholds = options.thresholds;
+            throw new Error("classifier offline");
+          };
         `,
         shortCircuit: true,
       };
@@ -78,7 +81,7 @@ before(async () => {
   await mkdir(join(cwd, ".omp"), { recursive: true });
   await writeFile(
     join(cwd, ".omp", "auto-mode.json"),
-    JSON.stringify({ allow: ["curl *", "sh"] }),
+    JSON.stringify({ allow: ["curl *", "sh"], thresholds: { fire: 0.5, clear: 0.4 } }),
   );
 });
 
@@ -117,6 +120,10 @@ describe("extension failure handling", () => {
     assert.match(invocation.title ?? "", /classifier unavailable, treated as ask \(classifier offline\)/);
     assert.deepEqual(invocation.notifications, ["auto-mode: classifier unavailable (classifier offline)"]);
     assert.match(warnings.at(-1) ?? "", /classification failed for bash; asking: classifier offline/);
+    assert.deepEqual(
+      (globalThis as { __autoModeTestThresholds?: unknown }).__autoModeTestThresholds,
+      { fire: 0.5, clear: 0.4 },
+    );
   });
 
   it("blocks a classifier error when no approval UI exists", async () => {

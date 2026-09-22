@@ -127,9 +127,12 @@ export default function autoMode(pi: ExtensionAPI): void {
       return prompt(reason, undefined);
     }
 
+    const rules = await loadRules(
+      { project: join(ctx.cwd, ".omp", RULES_FILE), agent: join(getAgentDir(), RULES_FILE) },
+      DEFAULT_THRESHOLDS,
+    );
     const chain = command === undefined ? undefined : tokenize(command);
     if (chain !== undefined) {
-      const rules = await loadRules([join(ctx.cwd, ".omp", RULES_FILE), join(getAgentDir(), RULES_FILE)]);
       const ruled = decide(rules, chain);
       if (ruled?.tier === "allow") return;
       if (ruled?.tier === "ask") {
@@ -143,7 +146,7 @@ export default function autoMode(pi: ExtensionAPI): void {
     try {
       const apiKey = await ctx.modelRegistry.getApiKeyForProvider(TYPESAFE_PROVIDER);
       const result = await classify([call], {
-        thresholds: DEFAULT_THRESHOLDS,
+        thresholds: rules.thresholds,
         projectDir: ctx.cwd,
         ...(apiKey === undefined ? {} : { apiKey }),
       });

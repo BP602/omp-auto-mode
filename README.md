@@ -77,15 +77,16 @@ operations, remote-fetch-then-execute shapes, and network shells prompt even if 
 matches and even if Jev is unavailable. A classifier error also prompts instead of falling through.
 Both cases block when no UI is available (`-p`, CI).
 
-### Allow and ask rules
+### Rules and thresholds
 
-Commands you trust (or always want to approve by hand) can skip the model entirely. Rules live in
-`<project>/.omp/auto-mode.json` and `~/.omp/agent/auto-mode.json`, merged:
+The same two config files control commands that skip the model and the thresholds used by the
+extension. Files at `<project>/.omp/auto-mode.json` and `~/.omp/agent/auto-mode.json` are merged:
 
 ```json
 {
   "allow": ["git status", "git diff *", "npm run *", "ls *"],
-  "ask": ["git commit *", "git push *"]
+  "ask": ["git commit *", "git push *"],
+  "thresholds": { "fire": 0.7, "clear": 0.3 }
 }
 ```
 
@@ -94,6 +95,11 @@ Commands you trust (or always want to approve by hand) can skip the model entire
   nothing and sends nothing, so hazard scoring will never stop it for you). With no UI available
   — `-p`, CI — an `ask` rule blocks, which is also the only block a rule can produce: a tier you
   cannot say yes to would just be a worse version of this one.
+
+The agent-directory thresholds establish the user's baseline; omitted thresholds use the defaults
+above. A project can tighten policy by lowering `fire` or raising `clear`. Values that move the
+other way are ignored, and a combination that would make `clear > fire` fails closed, so a cloned
+repository cannot weaken the user's gate. Both values must be numbers in `[0, 1]`.
 
 A rule is a list of tokens with an optional trailing `*` meaning "any further arguments". The
 **most specific** matching rule governs a command — literal tokens counted, exact beating wildcard,

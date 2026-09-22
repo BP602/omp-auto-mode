@@ -1,5 +1,5 @@
 /**
- * Deterministic allow/ask rules for bash commands, checked before the classifier is consulted.
+ * Deterministic bash rules and classifier-threshold config, checked before classification.
  *
  * A rule is a whitespace-separated token list, optionally ending in `*` ("any further arguments"):
  * `git status`, `npm run *`. It matches a command only when that command is a flat argument
@@ -13,10 +13,11 @@
  * from the dialog could never outrank the `git commit *` ask rule that produced the dialog.
  *
  * Config shape, at `<project>/.omp/auto-mode.json` and `<agent dir>/auto-mode.json`:
- * `{ "allow": ["git status", "npm run *"], "ask": ["git push *"] }`.
+ * `{ "allow": ["git status"], "ask": ["git push *"], "thresholds": { "fire": 0.7, "clear": 0.3 } }`.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import type { Thresholds } from "./classifier.ts";
 
 export type Rule = readonly string[];
 
@@ -29,6 +30,10 @@ export type Tier = "allow" | "ask";
 export interface Rules {
   readonly allow: readonly Rule[];
   readonly ask: readonly Rule[];
+}
+
+export interface LoadedRules extends Rules {
+  readonly thresholds: Thresholds;
 }
 
 /** The deciding rule is only meaningful for `ask`: an allowed chain is allowed by one rule per command. */
@@ -243,6 +248,7 @@ export const suggestRules = (argv: Argv): readonly Rule[] => {
 interface RulesFile {
   readonly allow?: readonly string[];
   readonly ask?: readonly string[];
+  readonly thresholds?: Thresholds;
 }
 
 const readRulesFile = async (path: string): Promise<RulesFile> => {
@@ -267,19 +273,59 @@ const readRulesFile = async (path: string): Promise<RulesFile> => {
     }
     return value;
   };
+  const thresholds = (value: unknown): Thresholds => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new InvalidRule(`${path}: "thresholds" must be an object`);
+    }
+    const record = value as Record<string, unknown>;
+    const probability = (key: "fire" | "clear"): number => {
+      const candidate = record[key];
+      if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate < 0 || candidate > 1) {
+        throw new InvalidRule(`${path}: "thresholds.${key}" must be a number between 0 and 1`);
+      }
+      return candidate;
+    };
+    const parsed = { fire: probability("fire"), clear: probability("clear") };
+    if (parsed.clear > parsed.fire) {
+      throw new InvalidRule(`${path}: "thresholds.clear" (${parsed.clear}) must not exceed "thresholds.fire" (${parsed.fire})`);
+    }
+    return parsed;
+  };
   // Keep only the keys the file actually has, so a rewrite does not invent empty ones.
   return {
     ...("allow" in data ? { allow: list("allow", data.allow) } : {}),
     ...("ask" in data ? { ask: list("ask", data.ask) } : {}),
+    ...("thresholds" in data ? { thresholds: thresholds(data.thresholds) } : {}),
   };
 };
 
-/** Merge the rules from every path that exists; missing files contribute nothing. */
-export const loadRules = async (paths: readonly string[]): Promise<Rules> => {
-  const files = await Promise.all(paths.map(readRulesFile));
+/**
+ * Merge project and agent rules. Agent thresholds establish the baseline. Lowering `fire` and
+ * raising `clear` are the only monotonic tightenings; any combination that collapses their order
+ * is rejected rather than silently weakening one boundary.
+ */
+export const loadRules = async (
+  paths: { readonly project: string; readonly agent: string },
+  defaults: Thresholds,
+): Promise<LoadedRules> => {
+  const [project, agent] = await Promise.all([readRulesFile(paths.project), readRulesFile(paths.agent)]);
+  const baseline = agent.thresholds ?? defaults;
+  const thresholds =
+    project.thresholds === undefined
+      ? baseline
+      : {
+          fire: Math.min(project.thresholds.fire, baseline.fire),
+          clear: Math.max(project.thresholds.clear, baseline.clear),
+        };
+  if (thresholds.clear > thresholds.fire) {
+    throw new InvalidRule(
+      `${paths.project}: project thresholds conflict with the agent threshold baseline (clear ${thresholds.clear} exceeds fire ${thresholds.fire})`,
+    );
+  }
   return {
-    allow: files.flatMap((file) => (file.allow ?? []).map(parseRule)),
-    ask: files.flatMap((file) => (file.ask ?? []).map(parseRule)),
+    allow: [project, agent].flatMap((file) => (file.allow ?? []).map(parseRule)),
+    ask: [project, agent].flatMap((file) => (file.ask ?? []).map(parseRule)),
+    thresholds,
   };
 };
 

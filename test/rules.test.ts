@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { DEFAULT_THRESHOLDS } from "../src/classifier.ts";
 import {
   appendAllowRule,
   decide,
@@ -239,29 +240,76 @@ describe("rules files", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  const load = (project: string, agent = join(dir, "missing-agent", "auto-mode.json")) =>
+    loadRules({ project, agent }, DEFAULT_THRESHOLDS);
+
   it("treats missing files as empty and merges the rest", async () => {
     const project = join(dir, "project", "auto-mode.json");
-    const user = join(dir, "user", "auto-mode.json");
-    assert.deepEqual(await loadRules([project, user]), { allow: [], ask: [] });
+    const agent = join(dir, "user", "auto-mode.json");
+    assert.deepEqual(await load(project, agent), {
+      allow: [],
+      ask: [],
+      thresholds: DEFAULT_THRESHOLDS,
+    });
 
     await appendAllowRule(project, ["git", "status"]);
     await mkdir(join(dir, "user"), { recursive: true });
-    await writeFile(user, JSON.stringify({ allow: ["npm run *"], ask: ["git push *"] }));
+    await writeFile(agent, JSON.stringify({ allow: ["npm run *"], ask: ["git push *"] }));
     await appendAllowRule(project, ["ls"]);
 
-    assert.deepEqual(await loadRules([project, user]), {
+    assert.deepEqual(await load(project, agent), {
       allow: [["git", "status"], ["ls"], ["npm", "run", "*"]],
       ask: [["git", "push", "*"]],
+      thresholds: DEFAULT_THRESHOLDS,
     });
     assert.deepEqual(JSON.parse(await readFile(project, "utf8")), { allow: ["git status", "ls"] });
+  });
+
+  it("uses agent thresholds as the baseline and applies only monotonic project tightenings", async () => {
+    const project = join(dir, "threshold-project", "auto-mode.json");
+    const agent = join(dir, "threshold-agent", "auto-mode.json");
+    await mkdir(join(dir, "threshold-project"), { recursive: true });
+    await writeFile(project, JSON.stringify({ thresholds: { fire: 0.9, clear: 0.2 } }));
+    assert.deepEqual((await load(project)).thresholds, DEFAULT_THRESHOLDS);
+
+    await mkdir(join(dir, "threshold-agent"), { recursive: true });
+    await writeFile(agent, JSON.stringify({ thresholds: { fire: 0.8, clear: 0.5 } }));
+    await writeFile(project, JSON.stringify({ thresholds: { fire: 0.7, clear: 0.4 } }));
+    assert.deepEqual((await load(project, agent)).thresholds, { fire: 0.7, clear: 0.5 });
+
+    await writeFile(project, JSON.stringify({ thresholds: { fire: 0.9, clear: 0.6 } }));
+    assert.deepEqual((await load(project, agent)).thresholds, { fire: 0.8, clear: 0.6 });
+
+    await writeFile(project, JSON.stringify({ thresholds: { fire: 0.4, clear: 0.3 } }));
+    await assert.rejects(load(project, agent), (error: unknown) => error instanceof InvalidRule && /conflict/.test(error.message));
+  });
+
+  it("rejects malformed threshold objects and boundaries", async () => {
+    const project = join(dir, "bad-thresholds", "auto-mode.json");
+    await mkdir(join(dir, "bad-thresholds"), { recursive: true });
+    const cases: readonly [unknown, RegExp][] = [
+      [null, /"thresholds" must be an object/],
+      [{ fire: 0.7 }, /"thresholds.clear"/],
+      [{ fire: -0.1, clear: 0 }, /"thresholds.fire"/],
+      [{ fire: 0.7, clear: 1.1 }, /"thresholds.clear"/],
+      [{ fire: 0.2, clear: 0.3 }, /must not exceed/],
+    ];
+    for (const [thresholds, message] of cases) {
+      await writeFile(project, JSON.stringify({ thresholds }));
+      await assert.rejects(load(project), (error: unknown) => error instanceof InvalidRule && message.test(error.message));
+    }
   });
 
   it("keeps the ask list when appending an allow rule", async () => {
     const path = join(dir, "tiers", "auto-mode.json");
     await mkdir(join(dir, "tiers"), { recursive: true });
-    await writeFile(path, JSON.stringify({ ask: ["git push *"] }));
+    await writeFile(path, JSON.stringify({ ask: ["git push *"], thresholds: { fire: 0.6, clear: 0.2 } }));
     await appendAllowRule(path, ["git", "status"]);
-    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { ask: ["git push *"], allow: ["git status"] });
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
+      ask: ["git push *"],
+      thresholds: { fire: 0.6, clear: 0.2 },
+      allow: ["git status"],
+    });
   });
 
   it("does not append a rule that is already present", async () => {
@@ -275,12 +323,12 @@ describe("rules files", () => {
     const path = join(dir, "bad.json");
     await appendAllowRule(path, ["ok"]);
     await writeFile(path, JSON.stringify({ allow: "git status" }));
-    await assert.rejects(loadRules([path]), InvalidRule);
+    await assert.rejects(load(path), InvalidRule);
   });
 
   it("rejects a leftover deny list rather than silently dropping the block", async () => {
     const path = join(dir, "deny.json");
     await writeFile(path, JSON.stringify({ allow: ["git status"], deny: ["git push --force *"] }));
-    await assert.rejects(loadRules([path]), (err: unknown) => err instanceof InvalidRule && /"ask"/.test(err.message));
+    await assert.rejects(load(path), (err: unknown) => err instanceof InvalidRule && /"ask"/.test(err.message));
   });
 });

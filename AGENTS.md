@@ -20,6 +20,7 @@ src/extension.ts ──▶ src/rules.ts ───┘
 - `rules.ts` is the deterministic layer in front of the model, bash only. `isCriticalBash()` mirrors omp's critical raw-command patterns and is checked first, before user rules, so yolo cannot suppress those prompts and an allow rule cannot bypass them. A critical match prompts without offering persistent allow and blocks when `!ctx.hasUI`.
 - User rules have two tiers, not three: `allow` runs without a model request and `ask` always prompts. `tokenize()` returns one argv per command in a top-level chain (`a && b`, `a; b`, `a | b`) or `undefined` when anything is unmodelled: expansions, globs, `~`, real redirect targets, backgrounding `&`, `if`/`for`/`{ … }`. Unmodelled commands go to the classifier. Redirections that cannot touch a file (`/dev/null` targets, `2>&1` dups) are dropped so harness-style `cmd 2>&1` still matches.
 - `decide()` picks the most specific matching rule per command (literal token count, exact beats wildcard, `ask` wins a tie), then asks if any command asks and allows only if every command is covered. This lets a persisted `git commit -m wip` allow rule outrank the `git commit *` ask rule that raised the dialog. `appendAllowRule` persists an "always allow" choice to the project file (de-duplicated), offered only for a single-command chain. A leftover `deny` key throws `InvalidRule`. Rules come from `<cwd>/.omp/auto-mode.json` and `<getAgentDir()>/auto-mode.json`, re-read on every gated call. Never widen `tokenize` to a real file target.
+- Thresholds share the rules files. `loadRules()` validates complete `{ fire, clear }` objects in `[0, 1]` with `clear <= fire`. Agent-directory thresholds establish the baseline (code defaults when absent); project config may lower `fire` or raise `clear`, with non-tightening values ignored. A conflicting merged pair fails closed. The merged thresholds apply to every classified tool, not only bash.
 
 ## Key Directories
 
@@ -56,7 +57,7 @@ src/extension.ts ──▶ src/rules.ts ───┘
 - `src/cli.ts` — `bin` entry; batch vs command mode split on `argv.indexOf("--")`.
 - `src/calls.ts` — `parseCallsFile`; the one place the JSON batch/fixture shape is validated.
 - `src/extension.ts` — `omp` default-export factory; `GATED_TOOLS`, `MAX_VALUE_CHARS`.
-- `src/rules.ts` — `isCriticalBash`, `tokenize`, `decide`, `suggestRules`, `loadRules`, `appendAllowRule`; the raw critical patterns plus `METACHARS` and the explicit `;`/`|`/`&` handling in `tokenize` are security boundaries.
+- `src/rules.ts` — `isCriticalBash`, `tokenize`, `decide`, `suggestRules`, `loadRules`, `appendAllowRule`; critical patterns, threshold validation/merge, `METACHARS`, and explicit `;`/`|`/`&` handling are security boundaries.
 - `fixtures/tool-calls.json` — borderline pairs worth preserving: `append-zshrc` (ask) vs `overwrite-zshrc` (unsafe), `git-push-branch` (ask) vs `force-push-main` (unsafe).
 - `package.json` — scripts, `bin`, `omp.extensions`, `engines.node >=23.6`.
 
