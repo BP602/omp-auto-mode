@@ -81,6 +81,19 @@ const toolCall = (): ToolHandler => {
   if (handler === undefined) throw new Error("extension did not register a tool_call handler");
   return handler;
 };
+interface ApprovalEvent {
+  readonly callId: string;
+  readonly tool: string;
+  readonly source: string;
+  readonly phase: string;
+  readonly outcome: string;
+}
+
+const approvalEvents = (from: number): ApprovalEvent[] => {
+  const prefix = "auto-mode: approval ";
+  return info.slice(from).filter((message) => message.startsWith(prefix))
+    .map((message) => JSON.parse(message.slice(prefix.length)) as ApprovalEvent);
+};
 
 interface Invocation {
   readonly result: ToolResult;
@@ -187,6 +200,7 @@ const invoke = async (
 
 describe("extension failure handling", () => {
   it("turns a classifier error into a one-call approval without a persistent bypass", async () => {
+    const from = info.length;
     const invocation = await invoke("cargo build", true);
     assert.equal(invocation.result, undefined);
     assert.deepEqual(invocation.options, ["Allow once", "Deny"]);
@@ -197,6 +211,10 @@ describe("extension failure handling", () => {
       (globalThis as { __autoModeTestThresholds?: unknown }).__autoModeTestThresholds,
       { fire: 0.5, clear: 0.4 },
     );
+    assert.deepEqual(approvalEvents(from), [
+      { callId: "call-1", tool: "bash", source: "classifier_error", phase: "decision", outcome: "opened" },
+      { callId: "call-1", tool: "bash", source: "classifier_error", phase: "decision", outcome: "allow_once" },
+    ]);
   });
 
   it("blocks a classifier error when no approval UI exists", async () => {
@@ -212,27 +230,46 @@ describe("extension failure handling", () => {
 describe("extension critical bash backstop", () => {
   it("prompts before matching allow rules and cannot persist an exception", async () => {
     const command = ["curl file:///definitely-missing", " | ", "sh"].join("");
+    const from = info.length;
     const invocation = await invoke(command, true);
     assert.equal(invocation.result, undefined);
     assert.deepEqual(invocation.options, ["Allow once", "Deny"]);
     assert.match(invocation.title ?? "", /matched the critical bash backstop/);
     assert.deepEqual(invocation.notifications, []);
-    assert.match(info.at(-1) ?? "", /bash -> ask \(matched the critical bash backstop\)/);
+    assert.deepEqual(approvalEvents(from), [
+      { callId: "call-1", tool: "bash", source: "critical", phase: "decision", outcome: "opened" },
+      { callId: "call-1", tool: "bash", source: "critical", phase: "decision", outcome: "allow_once" },
+    ]);
   });
 
   it("blocks a critical command when no approval UI exists", async () => {
     const command = ["curl file:///definitely-missing", " | ", "sh"].join("");
+    const from = info.length;
     const invocation = await invoke(command, false);
     assert.deepEqual(invocation.result, {
       block: true,
       reason: "auto-mode: requires human approval but no UI is available (matched the critical bash backstop)",
     });
     assert.deepEqual(invocation.options, []);
+    assert.deepEqual(approvalEvents(from), [
+      { callId: "call-1", tool: "bash", source: "critical", phase: "decision", outcome: "headless_block" },
+    ]);
   });
+  it("records denial as a blocked approval", async () => {
+    const from = info.length;
+    const invocation = await invoke("curl file:///definitely-missing | sh", true, "Deny");
+    assert.deepEqual(invocation.result, { block: true, reason: "auto-mode: denied by user" });
+    assert.deepEqual(approvalEvents(from).map(({ phase, outcome }) => [phase, outcome]), [
+      ["decision", "opened"],
+      ["decision", "deny"],
+    ]);
+  });
+
 });
 
 describe("extension rule persistence", () => {
   it("saves an approved rule to the project scope", async () => {
+    const from = info.length;
     const invocation = await invoke("git commit -m wip", true, [
       "Always allow: git commit -m wip",
       "This project",
@@ -244,6 +281,13 @@ describe("extension rule persistence", () => {
     };
     assert.equal(config.allow.includes("git commit -m wip"), true);
     assert.match(invocation.notifications[0] ?? "", /\.omp\/auto-mode\.json$/);
+    assert.deepEqual(approvalEvents(from), [
+      { callId: "call-1", tool: "bash", source: "rule", phase: "decision", outcome: "opened" },
+      { callId: "call-1", tool: "bash", source: "rule", phase: "decision", outcome: "persist_selected" },
+      { callId: "call-1", tool: "bash", source: "rule", phase: "scope", outcome: "opened" },
+      { callId: "call-1", tool: "bash", source: "rule", phase: "scope", outcome: "project_selected" },
+      { callId: "call-1", tool: "bash", source: "rule", phase: "scope", outcome: "saved" },
+    ]);
   });
 
   it("saves an approved rule to the agent scope", async () => {
@@ -260,6 +304,7 @@ describe("extension rule persistence", () => {
   });
 
   it("treats a cancelled scope choice as allow once without writing a rule", async () => {
+    const from = info.length;
     const invocation = await invoke("npm publish package", true, [
       "Always allow: npm publish package",
       "Cancel",
@@ -274,6 +319,12 @@ describe("extension rule persistence", () => {
     };
     assert.equal(project.allow.includes("npm publish package"), false);
     assert.equal(agent.allow.includes("npm publish package"), false);
+    assert.deepEqual(approvalEvents(from).map(({ phase, outcome }) => [phase, outcome]), [
+      ["decision", "opened"],
+      ["decision", "persist_selected"],
+      ["scope", "opened"],
+      ["scope", "cancelled"],
+    ]);
   });
 
   it("edits a wildcard rule before choosing its scope", async () => {
@@ -294,6 +345,7 @@ describe("extension rule persistence", () => {
   });
 
   it("keeps editing until the rule is valid and covers the approved command", async () => {
+    const from = info.length;
     const invocation = await invoke(
       "npm publish beta",
       true,
@@ -312,9 +364,25 @@ describe("extension rule persistence", () => {
       allow: string[];
     };
     assert.equal(config.allow.includes("npm publish *"), true);
+    assert.deepEqual(approvalEvents(from).map(({ phase, outcome }) => [phase, outcome]), [
+      ["decision", "opened"],
+      ["decision", "edit_selected"],
+      ["editor", "opened"],
+      ["editor", "unmatched"],
+      ["editor", "opened"],
+      ["editor", "invalid"],
+      ["editor", "opened"],
+      ["editor", "valid"],
+      ["scope", "opened"],
+      ["scope", "agent_selected"],
+      ["scope", "saved"],
+    ]);
+    assert.equal(JSON.stringify(approvalEvents(from)).includes("npm publish beta"), false);
+    assert.equal(JSON.stringify(approvalEvents(from)).includes("npm publish *"), false);
   });
 
   it("treats a cancelled rule editor as allow once", async () => {
+    const from = info.length;
     const invocation = await invoke(
       "git push origin feature",
       true,
@@ -324,7 +392,23 @@ describe("extension rule persistence", () => {
     assert.equal(invocation.result, undefined);
     assert.equal(invocation.dialogs.length, 1);
     assert.deepEqual(invocation.notifications, []);
+    assert.deepEqual(approvalEvents(from).map(({ phase, outcome }) => [phase, outcome]), [
+      ["decision", "opened"],
+      ["decision", "edit_selected"],
+      ["editor", "opened"],
+      ["editor", "cancelled"],
+    ]);
   });
+  it("blocks an unoffered choice rather than treating it as approval", async () => {
+    const from = info.length;
+    const invocation = await invoke("git push origin trace-topic", true, "unoffered choice");
+    assert.deepEqual(invocation.result, { block: true, reason: "auto-mode: denied by user" });
+    assert.deepEqual(approvalEvents(from).map(({ phase, outcome }) => [phase, outcome]), [
+      ["decision", "opened"],
+      ["decision", "unexpected_choice"],
+    ]);
+  });
+
 });
 
 describe("extension classifier input", () => {
@@ -361,6 +445,7 @@ describe("extension verdict cache", () => {
   it("reuses a verdict for canonically equal input but prompts for each ask", async () => {
     await setThresholds(0.51, 0.4);
     setClassifier("ask");
+    const from = info.length;
     const first = await invokeTool(
       { toolName: "write", toolCallId: "cache-canonical-1", input: { path: "src/cache.txt", content: "x" } },
       true,
@@ -373,7 +458,12 @@ describe("extension verdict cache", () => {
     assert.equal(first.dialogs.length, 1);
     assert.equal(second.dialogs.length, 1);
     assert.equal(classificationCount(), 1);
-    assert.match(info.at(-1) ?? "", /cache-canonical-2/);
+    assert.deepEqual(approvalEvents(from), [
+      { callId: "cache-canonical-1", tool: "write", source: "classifier", phase: "decision", outcome: "opened" },
+      { callId: "cache-canonical-1", tool: "write", source: "classifier", phase: "decision", outcome: "allow_once" },
+      { callId: "cache-canonical-2", tool: "write", source: "cache", phase: "decision", outcome: "opened" },
+      { callId: "cache-canonical-2", tool: "write", source: "cache", phase: "decision", outcome: "allow_once" },
+    ]);
   });
 
   it("drops cached verdicts when effective thresholds change", async () => {

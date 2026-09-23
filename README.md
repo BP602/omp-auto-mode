@@ -144,6 +144,24 @@ you never approved.
 Critical-pattern and classifier-error prompts offer only **Allow once** and **Deny**. An outage or
 backstop match cannot create a permanent bypass.
 
+### Approval traces
+
+The extension writes approval events to omp's persistent log (normally
+`~/.omp/logs/omp.YYYY-MM-DD.PID.log`), not to a second plugin-owned file. Search for
+`auto-mode: approval `; each line contains JSON with `callId`, `tool`, `source`, `phase`, and
+`outcome`. The source is `critical`, `rule`, `classifier`, `cache`, or `classifier_error`.
+Phases are `decision` (the approval dialog), `editor` (a custom rule), and `scope` (where to
+save it). An `opened` event precedes each dialog; a later outcome records the selection,
+cancel, headless block, or saved rule. Cancelling the initial decision denies the call;
+cancelling the editor or scope allows this call without persisting a rule.
+
+Use `callId` to correlate these events with tool-call events in the session. Two `decision`
+`opened` events for the same call mean auto-mode entered its approval flow twice. If there is
+only one but two *initial approval* prompts are visible, check other gates; the rule editor
+and scope selector have distinct phases. An unmatched `opened` means the dialog did not return
+or its result was not logged, not that the tool ran. These structured records omit command
+input, edited rule text, paths, and credentials; older descriptive verdict messages are separate.
+
 ## CLI
 
 ```bash

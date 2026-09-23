@@ -89,6 +89,27 @@ const bashCommand = (event: ToolCallEvent): string | undefined => {
   return typeof command === "string" ? command : undefined;
 };
 
+type ApprovalSource = "critical" | "rule" | "classifier" | "cache" | "classifier_error";
+
+type ApprovalTrace = (
+  phase: "decision" | "editor" | "scope",
+  outcome:
+    | "opened"
+    | "allow_once"
+    | "deny"
+    | "cancelled"
+    | "unexpected_choice"
+    | "persist_selected"
+    | "edit_selected"
+    | "invalid"
+    | "unmatched"
+    | "valid"
+    | "project_selected"
+    | "agent_selected"
+    | "saved"
+    | "headless_block",
+) => void;
+
 /**
  * Ask the user what to do. Persistent choices are offered only for a single command the rule
  * matcher can represent. Suggested rules can be edited and must still cover that command;
@@ -100,6 +121,7 @@ const askUser = async (
   summary: string,
   reason: string,
   chain: Chain | undefined,
+  trace: ApprovalTrace,
 ): Promise<"allow" | "deny"> => {
   const only = chain?.length === 1 ? chain[0]! : undefined;
   const persistable: readonly Rule[] = only === undefined ? [] : suggestRules(only);
@@ -107,6 +129,7 @@ const askUser = async (
   const DENY = "Deny";
   const always = persistable.map((rule) => ({ rule, label: `Always allow: ${formatRule(rule)}` }));
 
+  trace("decision", "opened");
   const choice = await ctx.ui.select(`auto-mode: approve ${toolName}?\n${summary}\n\n${reason}`, [
     ALLOW_ONCE,
     ...always.map(({ label }) => ({ label, description: "Choose a scope after approval" })),
@@ -114,30 +137,55 @@ const askUser = async (
     DENY,
   ]);
 
-  if (choice === undefined || choice === DENY) return "deny";
+  if (choice === undefined) {
+    trace("decision", "cancelled");
+    return "deny";
+  }
+  if (choice === DENY) {
+    trace("decision", "deny");
+    return "deny";
+  }
+  if (choice === ALLOW_ONCE) {
+    trace("decision", "allow_once");
+    return "allow";
+  }
   let rule = always.find(({ label }) => label === choice)?.rule;
   if (choice === EDIT_RULE && only !== undefined) {
+    trace("decision", "edit_selected");
     let prefill = formatRule(persistable.at(-1)!);
     while (rule === undefined) {
+      trace("editor", "opened");
       const edited = await ctx.ui.editor("auto-mode: edit allow rule", prefill, undefined, { promptStyle: true });
-      if (edited === undefined) return "allow";
+      if (edited === undefined) {
+        trace("editor", "cancelled");
+        return "allow";
+      }
       prefill = edited;
       try {
         const candidate = parseRule(edited);
         if (!ruleCovers(candidate, only)) {
+          trace("editor", "unmatched");
           ctx.ui.notify("auto-mode: rule does not match the approved command", "warning");
           continue;
         }
         rule = candidate;
+        trace("editor", "valid");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        trace("editor", "invalid");
         ctx.ui.notify(`auto-mode: invalid allow rule (${message})`, "warning");
       }
     }
+  } else if (rule !== undefined) {
+    trace("decision", "persist_selected");
+  } else {
+    trace("decision", "unexpected_choice");
+    return "deny";
   }
   if (rule !== undefined) {
     const project = join(ctx.cwd, ".omp", RULES_FILE);
     const agent = join(getAgentDir(), RULES_FILE);
+    trace("scope", "opened");
     const scope = await ctx.ui.select(`auto-mode: save "${formatRule(rule)}" where?`, [
       { label: PROJECT_SCOPE, description: project },
       { label: AGENT_SCOPE, description: agent },
@@ -145,8 +193,12 @@ const askUser = async (
     ]);
     const path = scope === PROJECT_SCOPE ? project : scope === AGENT_SCOPE ? agent : undefined;
     if (path !== undefined) {
+      trace("scope", scope === PROJECT_SCOPE ? "project_selected" : "agent_selected");
       await appendAllowRule(path, rule);
+      trace("scope", "saved");
       ctx.ui.notify(`auto-mode: added allow rule "${formatRule(rule)}" to ${path}`, "info");
+    } else {
+      trace("scope", "cancelled");
     }
   }
   return "allow";
@@ -165,10 +217,20 @@ export default function autoMode(pi: ExtensionAPI): void {
       MAX_SUMMARY_CHARS,
     );
 
+    const traceFor =
+      (source: ApprovalSource): ApprovalTrace =>
+      (phase, outcome) => {
+        pi.logger.info(`auto-mode: approval ${JSON.stringify({ callId: event.toolCallId, tool: event.toolName, source, phase, outcome })}`);
+      };
+
     /** Run the approval dialog, or block when there is nobody to answer it. */
-    const prompt = async (reason: string, chain: Chain | undefined) => {
-      if (!ctx.hasUI) return { block: true, reason: `auto-mode: requires human approval but no UI is available (${reason})` };
-      const decision = await askUser(ctx, event.toolName, summary, reason, chain);
+    const prompt = async (reason: string, chain: Chain | undefined, source: ApprovalSource) => {
+      const trace = traceFor(source);
+      if (!ctx.hasUI) {
+        trace("decision", "headless_block");
+        return { block: true, reason: `auto-mode: requires human approval but no UI is available (${reason})` };
+      }
+      const decision = await askUser(ctx, event.toolName, summary, reason, chain, trace);
       return decision === "allow" ? undefined : { block: true, reason: "auto-mode: denied by user" };
     };
 
@@ -176,7 +238,7 @@ export default function autoMode(pi: ExtensionAPI): void {
     if (command !== undefined && isCriticalBash(command)) {
       const reason = "matched the critical bash backstop";
       pi.logger.info(`auto-mode: ${event.toolName} -> ask (${reason})`);
-      return prompt(reason, undefined);
+      return prompt(reason, undefined, "critical");
     }
 
     const rules = await loadRules(
@@ -195,7 +257,7 @@ export default function autoMode(pi: ExtensionAPI): void {
       if (ruled?.tier === "ask") {
         const reason = `matched ask rule "${formatRule(ruled.rule)}" in ${RULES_FILE}`;
         pi.logger.info(`auto-mode: ${event.toolName} -> ask (${reason})`);
-        return prompt(reason, chain);
+        return prompt(reason, chain, "rule");
       }
     }
 
@@ -223,7 +285,7 @@ export default function autoMode(pi: ExtensionAPI): void {
         const message = err instanceof Error ? err.message : String(err);
         pi.logger.warn(`auto-mode: classification failed for ${event.toolName}; asking: ${message}`);
         ctx.ui.notify(`auto-mode: classifier unavailable (${message})`, "warning");
-        return prompt(`classifier unavailable, treated as ask (${message})`, undefined);
+        return prompt(`classifier unavailable, treated as ask (${message})`, undefined, "classifier_error");
       }
     }
 
@@ -237,7 +299,7 @@ export default function autoMode(pi: ExtensionAPI): void {
         ctx.ui.notify(`auto-mode: blocked ${event.toolName} (${reason})`, "error");
         return { block: true, reason: `auto-mode: blocked as unsafe (${reason})` };
       case "ask":
-        return prompt(reason, chain);
+        return prompt(reason, chain, cached === undefined ? "classifier" : "cache");
       default:
         return verdict.label satisfies never;
     }
