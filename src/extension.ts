@@ -18,7 +18,9 @@
  */
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ToolCallEvent } from "@oh-my-pi/pi-coding-agent";
+import { editInspect } from "@oh-my-pi/pi-natives";
 import { classify, DEFAULT_THRESHOLDS, describeVerdict, type ToolCall, type Verdict } from "./classifier.ts";
+import { editTargets, withinRoots, writeTargets } from "./paths.ts";
 import {
   appendAllowRule,
   decide,
@@ -258,6 +260,15 @@ export default function autoMode(pi: ExtensionAPI): void {
         const reason = `matched ask rule "${formatRule(ruled.rule)}" in ${RULES_FILE}`;
         pi.logger.info(`auto-mode: ${event.toolName} -> ask (${reason})`);
         return prompt(reason, chain, "rule");
+      }
+    }
+    if (rules.allowPaths.length > 0 && (event.toolName === "write" || event.toolName === "edit")) {
+      const targets = event.toolName === "write"
+        ? writeTargets(event.input)
+        : editTargets(event.input, editInspect);
+      if (targets !== undefined && await withinRoots(targets, rules.allowPaths, ctx.cwd)) {
+        pi.logger.info(`auto-mode: path allow ${JSON.stringify({ callId: event.toolCallId, tool: event.toolName })}`);
+        return;
       }
     }
 

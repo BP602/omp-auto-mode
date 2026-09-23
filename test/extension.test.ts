@@ -7,10 +7,12 @@ import { after, before, describe, it } from "node:test";
 
 const OMP_STUB = "auto-mode-test:omp";
 const CLASSIFIER_STUB = "auto-mode-test:classifier";
+const NATIVES_STUB = "auto-mode-test:natives";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@oh-my-pi/pi-coding-agent") return { url: OMP_STUB, shortCircuit: true };
+    if (specifier === "@oh-my-pi/pi-natives") return { url: NATIVES_STUB, shortCircuit: true };
     if (specifier === "./classifier.ts" && context.parentURL?.endsWith("/src/extension.ts")) {
       return { url: CLASSIFIER_STUB, shortCircuit: true };
     }
@@ -21,6 +23,13 @@ registerHooks({
       return {
         format: "module",
         source: "export const getAgentDir = () => globalThis.__autoModeTestAgentDir;",
+        shortCircuit: true,
+      };
+    }
+    if (url === NATIVES_STUB) {
+      return {
+        format: "module",
+        source: `export const editInspect = () => globalThis.__autoModeTestEditInspection ?? { paths: [], entries: [], fileOps: [] };`,
         shortCircuit: true,
       };
     }
@@ -503,6 +512,74 @@ describe("extension verdict cache", () => {
     await invoke("cargo cache-failure", true);
     await invoke("cargo cache-failure", true);
 
+    assert.equal(classificationCount(), 2);
+  });
+});
+
+describe("trusted directory pre-approval", () => {
+  let root: string;
+  before(async () => {
+    root = join(cwd, "trusted");
+    await mkdir(root);
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "auto-mode.json"), JSON.stringify({ allowPaths: [root] }));
+  });
+  after(async () => {
+    await rm(join(agentDir, "auto-mode.json"));
+    delete (globalThis as { __autoModeTestEditInspection?: unknown }).__autoModeTestEditInspection;
+  });
+
+  it("skips classification only for plain writes beneath a trusted root", async () => {
+    setClassifier(undefined);
+    const from = info.length;
+    const inside = await invokeTool(
+      { toolName: "write", toolCallId: "trusted-write", input: { path: join(root, "new.txt"), content: "x" } },
+      false,
+    );
+    assert.equal(inside.result, undefined);
+    assert.equal(classificationCount(), 0);
+    assert.deepEqual(info.slice(from), ['auto-mode: path allow {"callId":"trusted-write","tool":"write"}']);
+
+    const outside = await invokeTool(
+      { toolName: "write", toolCallId: "outside-write", input: { path: join(cwd, "outside.txt"), content: "x" } },
+      false,
+    );
+    assert.equal(outside.result?.block, true);
+    assert.equal(classificationCount(), 1);
+  });
+
+  it("requires every inspected edit target and move destination to remain beneath the root", async () => {
+    setClassifier(undefined);
+    (globalThis as { __autoModeTestEditInspection?: unknown }).__autoModeTestEditInspection = {
+      paths: [join(root, "new.txt")], entries: [], fileOps: [],
+    };
+    const inside = await invokeTool(
+      { toolName: "edit", toolCallId: "trusted-edit", input: { patch: "edit" } },
+      false,
+    );
+    assert.equal(inside.result, undefined);
+    assert.equal(classificationCount(), 0);
+
+    (globalThis as { __autoModeTestEditInspection?: unknown }).__autoModeTestEditInspection = {
+      paths: [join(root, "new.txt")], entries: [], fileOps: [{ path: join(root, "new.txt"), to: join(cwd, "outside.txt") }],
+    };
+    const outside = await invokeTool(
+      { toolName: "edit", toolCallId: "escaping-edit", input: { patch: "move" } },
+      false,
+    );
+    assert.equal(outside.result?.block, true);
+    assert.equal(classificationCount(), 1);
+  });
+
+  it("does not pre-approve eval or ast_edit merely because their input mentions the root", async () => {
+    setClassifier(undefined);
+    for (const toolName of ["eval", "ast_edit"]) {
+      const invocation = await invokeTool(
+        { toolName, toolCallId: `trusted-${toolName}`, input: { path: join(root, "new.txt") } },
+        false,
+      );
+      assert.equal(invocation.result?.block, true);
+    }
     assert.equal(classificationCount(), 2);
   });
 });

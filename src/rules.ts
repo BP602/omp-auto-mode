@@ -14,9 +14,11 @@
  *
  * Config shape, at `<project>/.omp/auto-mode.json` and `<agent dir>/auto-mode.json`:
  * `{ "allow": ["git status"], "ask": ["git push *"], "thresholds": { "fire": 0.7, "clear": 0.3 } }`.
+ * The agent file may also list `allowPaths` (see `paths.ts`); a project file cannot, because a
+ * cloned repository must not grant itself writes to host directories.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import type { Thresholds } from "./classifier.ts";
 
 export type Rule = readonly string[];
@@ -34,6 +36,8 @@ export interface Rules {
 
 export interface LoadedRules extends Rules {
   readonly thresholds: Thresholds;
+  /** Absolute, normalized directory roots for `write`/`edit` pre-approval; agent file only. */
+  readonly allowPaths: readonly string[];
 }
 
 /** The deciding rule is only meaningful for `ask`: an allowed chain is allowed by one rule per command. */
@@ -250,6 +254,7 @@ interface RulesFile {
   readonly allow?: readonly string[];
   readonly ask?: readonly string[];
   readonly thresholds?: Thresholds;
+  readonly allowPaths?: readonly string[];
 }
 
 const readRulesFile = async (path: string): Promise<RulesFile> => {
@@ -292,11 +297,21 @@ const readRulesFile = async (path: string): Promise<RulesFile> => {
     }
     return parsed;
   };
+  const roots = (value: unknown): readonly string[] => {
+    const entries = list("allowPaths", value);
+    for (const entry of entries) {
+      if (!isAbsolute(entry) || entry.split("/").includes("..") || resolve(entry) === "/") {
+        throw new InvalidRule(`${path}: "allowPaths" entry "${entry}" must be an absolute directory below "/" without ".."`);
+      }
+    }
+    return entries;
+  };
   // Keep only the keys the file actually has, so a rewrite does not invent empty ones.
   return {
     ...("allow" in data ? { allow: list("allow", data.allow) } : {}),
     ...("ask" in data ? { ask: list("ask", data.ask) } : {}),
     ...("thresholds" in data ? { thresholds: thresholds(data.thresholds) } : {}),
+    ...("allowPaths" in data ? { allowPaths: roots(data.allowPaths) } : {}),
   };
 };
 
@@ -323,10 +338,16 @@ export const loadRules = async (
       `${paths.project}: project thresholds conflict with the agent threshold baseline (clear ${thresholds.clear} exceeds fire ${thresholds.fire})`,
     );
   }
+  if (project.allowPaths !== undefined) {
+    throw new InvalidRule(
+      `${paths.project}: "allowPaths" is only read from ${paths.agent}; a project cannot pre-approve host directories`,
+    );
+  }
   return {
     allow: [project, agent].flatMap((file) => (file.allow ?? []).map(parseRule)),
     ask: [project, agent].flatMap((file) => (file.ask ?? []).map(parseRule)),
     thresholds,
+    allowPaths: (agent.allowPaths ?? []).map((root) => resolve(root)),
   };
 };
 

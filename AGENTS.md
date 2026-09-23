@@ -10,7 +10,8 @@ Prototype "auto-mode" for `omp`: classifies a pending tool call as `safe` / `ask
 src/cli.ts ──────────────────────────┐
                                      ├──▶ src/classifier.ts ──▶ Jev (one systemOne request) ──▶ route() ──▶ Verdict
 src/extension.ts ──▶ src/rules.ts ───┘
-                     (allow/ask, no API call)
+        │            (allow/ask, no API call)
+        └──▶ src/paths.ts (allowPaths for write/edit, no API call)
 ```
 
 - `classifier.ts` is the engine. `HAZARDS` is a battery of 7 **Noul** (yes/no) questions; `classify(calls, options)` asks every hazard for every call in **one** `client.systemOne()` request (question ids `${hazard}_${i}`, state = `{ environment, project_dir, tool_calls }`), then `route()` turns each call's probabilities into a label.
@@ -18,7 +19,8 @@ src/extension.ts ──▶ src/rules.ts ───┘
 - `other_risk` is the catch-all hazard and is `fireOnly`: a mid-range probability on a fuzzy question means "mildly consequential", not "model unsure about a fact", so it never routes to `ask` from the uncertain band alone. Keep that asymmetry when adding hazards: crisp hazards get the band, fuzzy ones do not.
 - The extension (`src/extension.ts`) gates `GATED_TOOLS` only (read-tier tools are skipped), flattens/truncates inputs via `toClassifierInput`, and maps labels: `safe` → pass, `unsafe` → `{ block, reason }`, `ask` → `askUser` select dialog (block when `!ctx.hasUI`). Classifier/API failure is also an ask, with no persistent-allow option, and blocks when headless. This matters because `tools.approvalMode: yolo` makes the extension the only gate; falling through would run the call.
 - `toClassifierInput()` caps each value at 2,000 source characters. Values over the boundary retain the first and last 1,000 characters with the truncation marker between them; never regress to head-only truncation because the consequential statement may be at the tail.
-- `rules.ts` is the deterministic layer in front of the model, deliberately bash only. `write`, `edit`, `eval`, and `ast_edit` always use the classifier. Do not add path-shaped rules without matching omp's resolution semantics for symlinks, `..`/absolute escapes, internal URLs, archive/SQLite selectors, globs, and multi-file edit destinations; a partial matcher is an allow bypass. `isCriticalBash()` mirrors omp's critical raw-command patterns and is checked before user rules, so yolo cannot suppress those prompts and an allow rule cannot bypass them. A critical match prompts without persistent allow and blocks when `!ctx.hasUI`.
+- `rules.ts` is the deterministic command layer in front of the model, bash only. `isCriticalBash()` mirrors omp's critical raw-command patterns and is checked before user rules, so yolo cannot suppress those prompts and an allow rule cannot bypass them. A critical match prompts without persistent allow and blocks when `!ctx.hasUI`.
+- `paths.ts` is the only path-shaped rule: agent-file `allowPaths` roots pre-approve `write` and `edit` (never `bash`, `eval`, `ast_edit`). A partial matcher is an allow bypass, so every doubt falls through to the classifier: non-plain spellings (`:`/`?` selectors and URLs, `~`, `@`, `[`, `\`, `..`, control chars, Unicode spaces), targets not strictly beneath the root both lexically and after `realpath` of the target or its deepest existing ancestor, dangling links, non-regular or `nlink > 1` files, and missing relative `edit` targets (the native edit engine suffix-recovers those to other workspace files — verified, not hypothetical). Edit targets come from `editInspect` (`@oh-my-pi/pi-natives`) under **every** edit mode, because the active mode depends on model/env/settings the extension cannot see; union all `paths`, `entries`, and `fileOps` `path`/`to`, and any inspection throw means no allow. A project file containing `allowPaths` is an `InvalidRule`. This is approval, not containment: document, don't paper over, the check-to-write race.
 - Successful extension verdicts use a session-scoped, 128-entry LRU keyed by project directory, tool name, and canonically ordered post-truncation input. A threshold change clears the whole cache. Cache only completed classifications: failures must retry, and a cached `ask` verdict must still prompt on every call. On a hit, replace the cached verdict id with the current tool-call id.
 - User rules have two tiers, not three: `allow` runs without a model request and `ask` always prompts. `tokenize()` returns one argv per command in a top-level chain (`a && b`, `a; b`, `a | b`) or `undefined` when anything is unmodelled: expansions, globs, `~`, real redirect targets, backgrounding `&`, `if`/`for`/`{ … }`. Unmodelled commands go to the classifier. Redirections that cannot touch a file (`/dev/null` targets, `2>&1` dups) are dropped so harness-style `cmd 2>&1` still matches.
 - `decide()` picks the most specific matching rule per command (literal token count, exact beats wildcard, `ask` wins a tie), then asks if any command asks and allows only if every command is covered. This lets a persisted `git commit -m wip` allow rule outrank the `git commit *` ask rule that raised the dialog. Persistent choices are offered only for a single-command chain. The edit choice uses `parseRule()` and `ruleCovers()` in a retrying prompt; exact suggestions containing whitespace are omitted because they cannot round-trip through the config grammar. The scope selector writes project choices to `<cwd>/.omp/auto-mode.json`, everywhere choices to `<getAgentDir()>/auto-mode.json`, and cancellation allows once without writing. Persistence is de-duplicated. A leftover `deny` key throws `InvalidRule`. Both files are re-read on every gated call. Never widen `tokenize` to a real file target.
@@ -26,8 +28,8 @@ src/extension.ts ──▶ src/rules.ts ───┘
 
 ## Key Directories
 
-- `src/` — engine (`classifier.ts`), rules layer (`rules.ts`), shared batch-file parser (`calls.ts`), CLI, extension. No subfolders.
-- `test/classifier.test.ts` — fixture regression on the live API. `test/rules.test.ts` — pure unit tests for critical-pattern, tokenizing, matching, and rules-file boundaries. `test/extension.test.ts` — handler regressions with stubbed omp and classifier modules. Add deterministic boundaries to the latter two, never to the live fixture.
+- `src/` — engine (`classifier.ts`), command rules (`rules.ts`), directory roots (`paths.ts`), shared batch-file parser (`calls.ts`), CLI, extension. No subfolders.
+- `test/classifier.test.ts` — fixture regression on the live API. `test/rules.test.ts` — pure unit tests for critical-pattern, tokenizing, matching, and rules-file boundaries. `test/paths.test.ts` — real-filesystem root containment boundaries. `test/extension.test.ts` — handler regressions with stubbed omp, natives, and classifier modules. Add deterministic boundaries to those three, never to the live fixture.
 - `fixtures/tool-calls.json` — the regression corpus: 27 labelled calls in the same `{ project_dir, calls[{id,tool,input,expected}] }` shape the CLI's batch mode accepts (`expected` is ignored there).
 
 ## Development Commands
@@ -59,7 +61,8 @@ src/extension.ts ──▶ src/rules.ts ───┘
 - `src/cli.ts` — `bin` entry; batch vs command mode split on `argv.indexOf("--")`.
 - `src/calls.ts` — `parseCallsFile`; the one place the JSON batch/fixture shape is validated.
 - `src/extension.ts` — `omp` default-export factory; `GATED_TOOLS`, `MAX_VALUE_CHARS`.
-- `src/rules.ts` — `isCriticalBash`, `tokenize`, `parseRule`, `ruleCovers`, `decide`, `suggestRules`, `loadRules`, `appendAllowRule`; critical patterns, rule coverage, threshold validation/merge, `METACHARS`, and explicit `;`/`|`/`&` handling are security boundaries.
+- `src/rules.ts` — `isCriticalBash`, `tokenize`, `parseRule`, `ruleCovers`, `decide`, `suggestRules`, `loadRules`, `appendAllowRule`; critical patterns, rule coverage, threshold and `allowPaths` validation/merge, `METACHARS`, and explicit `;`/`|`/`&` handling are security boundaries.
+- `src/paths.ts` — `writeTargets`, `editTargets`, `withinRoots`; plain-spelling filter and real-destination resolution are security boundaries.
 - `fixtures/tool-calls.json` — borderline pairs worth preserving: `append-zshrc` (ask) vs `overwrite-zshrc` (unsafe), `git-push-branch` (ask) vs `force-push-main` (unsafe).
 - `package.json` — scripts, `bin`, `omp.extensions`, `engines.node >=23.6`.
 
@@ -67,7 +70,7 @@ src/extension.ts ──▶ src/rules.ts ───┘
 
 - Node ≥ 23.6 (native TS execution); npm with `package-lock.json`. No bundler, no emitted JS.
 - TypeScript 7 (the native Go compiler, stable release) for type checking only; `noEmit` everywhere.
-- `@oh-my-pi/pi-coding-agent` is a **types-only** devDependency; at runtime omp rewrites that specifier onto its bundled copy. `@typesafe-ai/sdk` is the only runtime dependency.
+- `@oh-my-pi/pi-coding-agent` and `@oh-my-pi/pi-natives` are **types-only** devDependencies (keep their versions aligned); at runtime omp rewrites those specifiers onto its bundled copies. `@oh-my-pi/pi-natives` cannot load under Node (Bun-only loader), so tests stub it. `@typesafe-ai/sdk` is the only runtime dependency.
 - The model version is not pinned (`jev-latest`); pass `--model jev-1.13.0` to compare against the tuned baseline.
 
 ## Testing & QA

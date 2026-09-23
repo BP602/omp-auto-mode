@@ -113,11 +113,15 @@ model — `$(…)`, backticks, expansions, globs, `~`, redirects to real files, 
 never matches `git status`. Redirects that cannot touch a file (`>/dev/null`, `2>&1`) are ignored
 for matching, so `npm test 2>&1` matches an `npm test` rule.
 
-Rules deliberately apply only to `bash`. `write`, `edit`, `eval`, and `ast_edit` always go through
-the classifier. A trustworthy path matcher would have to reproduce omp's handling of symlinks,
-`..` and absolute escapes, internal URLs, archive and database selectors, globs, and multi-file
-edit destinations. A simpler matcher would create an allow-rule bypass, so auto-mode does not
-maintain a second path-policy implementation.
+`bash` command rules do not apply to other tools. The agent-directory config may instead include
+`"allowPaths": ["/absolute/trusted-directory"]` to pre-approve plain local `write` and `edit`
+targets strictly beneath those directories without calling Jev. Project config cannot set
+`allowPaths`: a cloned repository must not grant itself host access. The directories must exist;
+symlinks are resolved before matching. An edit must keep every target, including a move
+destination, beneath a configured root. Ambiguous paths (including `..`, selectors, URLs,
+missing relative edit targets, and hard-linked files) fall through to the classifier. `bash`,
+`eval`, and `ast_edit` never inherit this permission. This is pre-approval, not filesystem
+containment: a path swapped after the check can evade it.
 
 Classifier input values are capped at 2,000 source characters. Longer values keep the first and
 last 1,000 characters with an omission marker between them, so trailing commands or secrets remain

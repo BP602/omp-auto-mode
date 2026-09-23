@@ -263,6 +263,7 @@ describe("rules files", () => {
       allow: [],
       ask: [],
       thresholds: DEFAULT_THRESHOLDS,
+      allowPaths: [],
     });
 
     await appendAllowRule(project, ["git", "status"]);
@@ -274,6 +275,7 @@ describe("rules files", () => {
       allow: [["git", "status"], ["ls"], ["npm", "run", "*"]],
       ask: [["git", "push", "*"]],
       thresholds: DEFAULT_THRESHOLDS,
+      allowPaths: [],
     });
     assert.deepEqual(JSON.parse(await readFile(project, "utf8")), { allow: ["git status", "ls"] });
   });
@@ -313,16 +315,45 @@ describe("rules files", () => {
     }
   });
 
-  it("keeps the ask list when appending an allow rule", async () => {
+  it("keeps other keys when appending an allow rule", async () => {
     const path = join(dir, "tiers", "auto-mode.json");
     await mkdir(join(dir, "tiers"), { recursive: true });
-    await writeFile(path, JSON.stringify({ ask: ["git push *"], thresholds: { fire: 0.6, clear: 0.2 } }));
+    await writeFile(
+      path,
+      JSON.stringify({ ask: ["git push *"], thresholds: { fire: 0.6, clear: 0.2 }, allowPaths: ["/tmp/scratch"] }),
+    );
     await appendAllowRule(path, ["git", "status"]);
     assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
       ask: ["git push *"],
       thresholds: { fire: 0.6, clear: 0.2 },
+      allowPaths: ["/tmp/scratch"],
       allow: ["git status"],
     });
+  });
+
+  it("reads allowPaths from the agent file only, normalized", async () => {
+    const project = join(dir, "roots-project", "auto-mode.json");
+    const agent = join(dir, "roots-agent", "auto-mode.json");
+    await mkdir(join(dir, "roots-agent"), { recursive: true });
+    await writeFile(agent, JSON.stringify({ allowPaths: ["/tmp/scratch/", "/var//cache/omp"] }));
+    assert.deepEqual((await load(project, agent)).allowPaths, ["/tmp/scratch", "/var/cache/omp"]);
+
+    await mkdir(join(dir, "roots-project"), { recursive: true });
+    await writeFile(project, JSON.stringify({ allowPaths: ["/tmp/scratch"] }));
+    await assert.rejects(
+      load(project, agent),
+      (error: unknown) => error instanceof InvalidRule && /only read from/.test(error.message),
+    );
+  });
+
+  it("rejects allowPaths entries that are not absolute directories below the root", async () => {
+    const project = join(dir, "roots-missing-project", "auto-mode.json");
+    const agent = join(dir, "bad-roots", "auto-mode.json");
+    await mkdir(join(dir, "bad-roots"), { recursive: true });
+    for (const allowPaths of [["tmp/scratch"], ["~/scratch"], ["/"], ["/tmp/../etc"], [42], "/tmp"]) {
+      await writeFile(agent, JSON.stringify({ allowPaths }));
+      await assert.rejects(load(project, agent), InvalidRule, JSON.stringify(allowPaths));
+    }
   });
 
   it("does not append a rule that is already present", async () => {

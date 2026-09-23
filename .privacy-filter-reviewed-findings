@@ -1,2 +1,11 @@
 test/extension.test.ts	private_person	05a2d7332eb9d8bf
 README.md	private_url	861c708c730212dc
+AGENTS.md	private_person	7a14be7a0da272d2
+AGENTS.md	private_person	dcf32d1d6c2e60f0
+AGENTS.md	private_person	2b4f5c907105b3bc
+package-lock.json	private_person	0635623eaf3e669f
+package-lock.json	private_person	c7c02904090bdfcc
+src/extension.ts	private_person	8f3476ee7b1e2506
+src/paths.ts	private_person	6c6e10719cd8cf96
+src/paths.ts	private_person	99176872aa5d48cc
+test/extension.test.ts	private_person	8f3476ee7b1e2506
